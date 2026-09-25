@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>视频解析下载</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <!-- 导航：宽屏在左侧竖排，窄屏自动变顶部横排 -->
+  <aside class="nav">
+    <div class="nav-brand">视频解析下载</div>
+    <nav class="nav-list">
+      <button class="nav-item is-active" data-view="parse" type="button">解析</button>
+      <button class="nav-item" data-view="history" type="button">解析历史</button>
+      <button class="nav-item" data-view="settings" type="button">设置</button>
+    </nav>
+  </aside>
+
+  <main class="main">
+    <!-- ========== 解析视图 ========== -->
+    <section class="view is-active" data-view="parse">
+      <div class="input-row">
+        <input id="url-input" class="input" type="text" placeholder="粘贴视频链接…" autocomplete="off">
+        <button id="paste-btn" class="btn btn-ghost" type="button">一键粘贴</button>
+      </div>
+      <p class="field-hint">支持直接粘贴整段分享文案，会自动提取其中的链接。</p>
+      <div class="input-actions">
+        <button id="parse-btn" class="btn btn-primary" type="button">解 析</button>
+      </div>
+      <div id="parse-result" class="card result is-hidden"></div>
+    </section>
+
+    <!-- ========== 历史视图 ========== -->
+    <section class="view" data-view="history">
+      <div class="view-head">
+        <h2 class="view-title">解析历史</h2>
+        <div class="head-actions">
+          <button id="clear-platform-btn" class="btn btn-ghost btn-sm" type="button">清空该平台</button>
+          <button id="clear-all-btn" class="btn btn-danger-ghost" type="button">全部清空</button>
+        </div>
+      </div>
+      <!-- 平台切换栏：顶部横向，每个平台带小图标 -->
+      <div id="platform-tabs" class="tabs" role="tablist"></div>
+      <div id="history-list" class="history"></div>
+    </section>
+
+    <!-- ========== 设置视图 ========== -->
+    <section class="view" data-view="settings">
+      <div class="view-head">
+        <h2 class="view-title">设置</h2>
+      </div>
+      <div class="card">
+        <div class="field">
+          <label class="field-label" for="output-dir">下载保存路径</label>
+          <div class="field-row">
+            <input id="output-dir" class="input" type="text" readonly>
+            <button id="pick-dir-btn" class="btn btn-ghost" type="button">选择文件夹</button>
+          </div>
+          <p class="field-hint">始终以最高画质下载，视频将保存到该目录。</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="field">
+          <label class="field-label" for="cookies-file">Cookie 文件（cookies.txt）</label>
+          <div class="field-row">
+            <input id="cookies-file" class="input" type="text" readonly placeholder="未设置">
+            <button id="pick-cookie-btn" class="btn btn-ghost" type="button">选择文件</button>
+          </div>
+          <p class="field-hint">
+            <strong>当前需要 Cookie 的平台</strong>：X(Twitter)、Instagram。
+            其余不需要：YouTube、B站、TikTok 都不用（实测给 YouTube 带 Cookie 反而会降画质）；
+            抖音已改用浏览器模式解析，同样不再需要。
+            Cookie 会过期，失效后重新导出覆盖即可。请用 Cookie-Editor 导出
+            <strong>Netscape 格式</strong>的 cookies.txt。
+          </p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="field">
+          <span class="field-label">反馈</span>
+          <p class="field-hint">遇到问题或有功能建议，欢迎邮件反馈。</p>
+          <a id="feedback-mail" class="btn btn-ghost" href="mailto:">发送邮件</a>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- 下载进度条：有任务时从底部出现 -->
+<div id="dl-bar" class="dl-bar is-hidden">
+  <div class="dl-row">
+    <span id="dl-label" class="dl-label">正在准备下载…</span>
+    <span id="dl-stat" class="dl-stat"></span>
+    <button id="dl-open" class="btn btn-ghost btn-sm is-hidden" type="button">打开文件夹</button>
+    <button id="dl-close" class="btn btn-ghost btn-sm is-hidden" type="button">关闭</button>
+  </div>
+  <div class="dl-track"><div id="dl-fill" class="dl-fill"></div></div>
+</div>
+
+<!-- 二次确认弹层 -->
+<div id="confirm" class="modal is-hidden" role="dialog" aria-modal="true">
+  <div class="modal-box">
+    <p id="confirm-text" class="modal-text"></p>
+    <div class="modal-actions">
+      <button id="confirm-cancel" class="btn btn-ghost" type="button">取消</button>
+      <button id="confirm-ok" class="btn btn-danger" type="button">确认删除</button>
+    </div>
+  </div>
+</div>
+
+<script src="brand-icons.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

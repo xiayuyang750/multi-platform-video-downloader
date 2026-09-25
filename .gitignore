@@ -1,0 +1,25 @@
+# Python 虚拟环境与缓存（可由 requirements 重建，不纳入版本控制）
+.venv/
+__pycache__/
+*.py[cod]
+
+# 安卓构建产物
+android/.gradle/
+android/build/
+android/app/build/
+android/.cxx/
+android/.idea/
+android/local.properties
+android/*.keystore
+
+# 安卓端原生依赖：体积大，由脚本交叉编译/下载生成
+android/app/src/main/jniLibs/**/libqjs.so
+android/app/src/main/jniLibs/**/libffmpeg.so
+android/app/src/main/jniLibs/**/libffprobe.so
+
+# 本机运行数据与临时文件
+*.db
+*.log
+.browser-profile/
+Thumbs.db
+desktop.ini

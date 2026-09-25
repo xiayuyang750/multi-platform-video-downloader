@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "note": "yt-dlp 默认配置规格。Windows 端(Python)与 Android 端(Kotlin)共用此规格，保证两端行为一致。",
+  "tuning_note": "concurrent_fragments 是分片并发数：DASH/HLS 流会同时下载多个分片，数值越大越快。yt-dlp 默认 1（最慢）。若遇到站点限流（表现为速度骤降或报错）可往下调。",
+
+  "download": {
+    "output_dir": "D:\\Download",
+    "filename_template": "%(title)s [%(id)s].%(ext)s",
+    "quality": "best",
+    "single_video_no_playlist": true
+  },
+
+  "engine": {
+    "js_runtimes": "node",
+    "ffmpeg_dir": "D:\\Dev-env\\FFmpeg\\bin",
+    "concurrent_fragments": 8,
+    "progress_delta": 1,
+    "progress_template": "download:__PROG__%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s"
+  },
+
+  "cookies": {
+    "file": "",
+    "note": "Netscape 格式 cookies.txt 的路径。只需给下面标记 use_cookies=true 的平台使用 —— 实测给 YouTube 带 cookie 会把画质从 1080p 降到 360p。"
+  },
+
+  "always_args": [
+    "--newline",
+    "--ignore-config",
+    "--windows-filenames",
+    "--no-mtime"
+  ],
+
+  "platform_rules": {
+    "youtube.com": { "use_cookies": false, "reason": "实测带 cookie 会把画质从 1080p 降到 360p（format 18）" },
+    "youtu.be": { "use_cookies": false, "reason": "同上，短链同属 YouTube" },
+    "bilibili.com": { "use_cookies": false, "reason": "实测带与不带都可用，不带更简单" },
+    "x.com": { "use_cookies": true, "reason": "X(Twitter) 对未登录访问限制严格，不带 cookie 会报「No video could be found in this tweet」；带 cookie 实测可解析出 1080p" },
+    "twitter.com": { "use_cookies": true, "reason": "同上" },
+    "instagram.com": { "use_cookies": true, "reason": "未实测；Instagram 通常需要登录态，先按需要 cookie 处理" },
+    "douyin.com": { "use_cookies": false, "status": "browser", "reason": "yt-dlp 走不通（须 a_bogus 签名 + 登录态），已改用本机浏览器监听接口拿无水印直链。实测可拿到全部 23 个清晰度档位，不再需要 cookie" }
+  }
+}
