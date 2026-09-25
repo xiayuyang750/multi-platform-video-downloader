@@ -1,0 +1,4 @@
+<resources>
+    <!-- 先用系统自带主题，不引入任何第三方依赖，方便验证构建链路本身是否通 -->
+    <style name="Theme.Ytdlp" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
