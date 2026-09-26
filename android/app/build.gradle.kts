@@ -81,6 +81,10 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.activity:activity-compose:1.13.0")
+    // 状态管理用 ViewModel：解析是几十秒的长任务，转屏或切后台不能把
+    // 进行中的状态丢掉；collectAsStateWithLifecycle 则保证界面不可见时停订阅
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
     // 底部导航要的三个图标（解析/历史/设置）在 core 里就有，
     // 不必引入 extended 那个几 MB 的大包
     implementation("androidx.compose.material:material-icons-core")

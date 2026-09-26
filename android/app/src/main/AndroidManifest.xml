@@ -14,10 +14,22 @@
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- 接收其他应用分享过来的链接：在 B站/YouTube 客户端里点
+                 「分享」就能直接选本应用，省掉「复制 → 切过来 → 粘贴」三步。
+                 分享的文本常常不只一个 URL（比如「【标题】 https://…」），
+                 所以拿到后要自己从文本里挑出链接。
+                 singleTop 是为了避免每次分享都新开一个 Activity 实例。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
 

@@ -1,57 +1,82 @@
 package com.ytdlp.android
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ytdlp.android.ui.AppViewModel
+import com.ytdlp.android.ui.MainScreen
 import com.ytdlp.android.ui.YtdlpTheme
-import com.ytdlp.android.ui.tone
 
 /**
- * 正式界面的入口。阶段 3 会在这里搭出解析/历史/设置三页。
+ * 正式界面的入口。
  *
- * 当前是工具链自检版：只验证 Compose 能编译、主题能生效、真机能跑起来。
- * 三种颜色分别来自设计令牌的 bg / text / accent，若它们显示正常，
- * 说明「从 style.css 抽出的配色」这条链路是通的。
+ * enableEdgeToEdge 让内容铺到状态栏/导航栏下方，配合 Scaffold 的
+ * contentWindowInsets 自动留出安全边距 —— Android 15 起状态栏颜色 API
+ * 已废弃，这是当前推荐做法。
  */
 class MainActivity : ComponentActivity() {
+
+    /** 待处理的分享链接。onNewIntent 和 onCreate 都可能写入，用 State 让界面感知。 */
+    private var sharedUrl by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        sharedUrl = extractUrl(intent)
+
         setContent {
             YtdlpTheme {
-                Column(
-                    Modifier
-                        .fillMaxSize()
-                        .background(tone.bg)
-                        .padding(24.dp)
-                ) {
-                    Text(
-                        "Compose 工具链自检",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = tone.text,
-                    )
-                    Text(
-                        "这行字能出现，说明 Compose 编译、主题注入、真机运行三件事都成立。\n" +
-                            "背景色 = tone.bg，正文色 = tone.text，下行 = tone.accent。",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = tone.textMuted,
-                        modifier = Modifier.padding(top = 12.dp),
-                    )
-                    Text(
-                        "accent 色测试",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = tone.accent,
-                        modifier = Modifier.padding(top = 12.dp),
-                    )
+                val vm: AppViewModel = viewModel()
+
+                // 别人分享链接过来时，直接填进输入框并自动解析 ——
+                // 用户点「分享」的意图本来就是「我要处理这个链接」，
+                // 再多点一次「解析」是多余的。
+                LaunchedEffect(sharedUrl) {
+                    sharedUrl?.let { url ->
+                        vm.onUrlChange(url)
+                        vm.parse()
+                        sharedUrl = null
+                    }
                 }
+
+                MainScreen(vm)
             }
         }
     }
+
+    /** singleTop 模式下再次分享会走这里，而不是重建 Activity。 */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        sharedUrl = extractUrl(intent)
+    }
+
+    private fun extractUrl(intent: Intent?): String? {
+        if (intent?.action != Intent.ACTION_SEND) return null
+        val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return null
+        return firstUrl(text)
+    }
+}
+
+/**
+ * 从一段文本里挑出第一个链接。
+ *
+ * 为什么不能直接用整段文本：分享出来的内容常常是
+ * 「【标题】 作者 https://...」这种带前后缀的形式，
+ * 直接当 URL 解析必然失败。也不能简单按空格切 —— 分享文本常带换行。
+ */
+internal fun firstUrl(text: String): String? {
+    val match = Regex("""https?://\S+""").find(text) ?: return null
+    // 中文标点常被连着抓进来（例如「看这个 https://x.com/a/status/1，很有意思」），
+    // 它们不是 URL 的一部分，要剪掉；英文句末的点同理，但域名里的点要留，
+    // 所以只从末尾逐个剥掉标点，剥到非标点为止。
+    return match.value.trimEnd('.', ',', ';', ':', '!', '?', ')', ']', '"', '\'',
+        '。', '，', '、', '；', '：', '！', '？', '）', '】', '」', '』', '《', '》')
 }
