@@ -116,16 +116,68 @@ ERROR_HINTS = [
         "Unable to extract",
         "无法从页面中提取视频信息。可能是该站点改版了，建议更新应用内置的解析引擎。",
     ),
+    # ---- 下面几条是实测各平台失败后补的，都是用户真实会撞到的 ----
+    (
+        "Unexpected response from webpage request",
+        "TikTok 拒绝了这次请求。常见原因有三种：\n"
+        "① 该视频有地区限制（需要对应地区的网络节点）；\n"
+        "② TikTok 要求登录态，可到「设置」导入 Cookie 后重试；\n"
+        "③ 站点改版，当前内置的解析引擎还处理不了。",
+    ),
+    (
+        "empty media response",
+        "Instagram 需要登录才能解析。\n"
+        "请到「设置 → Cookie 文件」导入 Cookie（导出前确保浏览器里已登录 Instagram）。\n"
+        "若导入后仍失败，可能是这条帖子本身不可访问（已删除或仅作者可见）。",
+    ),
+    (
+        "login required",
+        "该平台需要登录才能解析，请到「设置」导入 Cookie 后重试。",
+    ),
+    (
+        "Please report this issue",
+        "该站点可能改版了，当前内置的解析引擎还处理不了。\n"
+        "可以先试试其他方式打开原视频，或等应用更新。",
+    ),
+    (
+        "Unsupported URL",
+        "不支持这种链接。请确认粘贴的是单条视频的分享链接，而不是主页或合集。",
+    ),
 ]
 
 
+def _brief(text: str, limit: int = 200) -> str:
+    """把 yt-dlp 的多行英文报错压成一行并截断。
+
+    界面空间有限：原始报错只是留给排查用的线索，不需要全文。
+    不压的话会出现「一个报错占满整屏、用户还看不懂」的情况。
+    """
+    one_line = " ".join((text or "").split())
+    return one_line[:limit] + "…" if len(one_line) > limit else one_line
+
+
 def friendly_error(raw: str) -> str:
-    """把英文报错翻译成中文说明；没匹配到就原样返回。"""
+    """把英文报错翻译成中文说明。
+
+    两条原则：
+      1. 已知原因 → 给出「说人话的原因 + 该怎么办」；
+      2. 未知原因 → 也要给一句中文兜底，而不是把 yt-dlp 的英文原样丢给用户。
+         实测遇到的绝大多数失败都落在三种情况里（要登录 / 地区限制或已删除 /
+         站点改版），把它们列出来，用户至少知道该往哪个方向试。
+    """
     text = (raw or "").strip()
+    if not text:
+        return "解析失败，但没有拿到具体原因。可以打开「引擎自检页」看看细节。"
     for needle, hint in ERROR_HINTS:
         if needle.lower() in text.lower():
-            return f"{hint}\n\n原始报错：{text[:240]}"
-    return text
+            return f"{hint}\n\n原始报错：{_brief(text)}"
+    return (
+        "解析失败。常见原因有以下几种：\n"
+        "① 该视频需要登录（可到「设置」导入 Cookie）；\n"
+        "② 视频有地区限制、已被删除或设为私享；\n"
+        "③ 站点改版，当前内置的解析引擎还不支持。\n\n"
+        f"原始报错：{_brief(text)}"
+    )
 
 
 # ==================== 文件名长度 ====================

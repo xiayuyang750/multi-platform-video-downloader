@@ -62,8 +62,16 @@ class DouyinActivity : Activity() {
         val web = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
-            // 用移动版 UA：抖音对桌面 UA 的页面结构不同，可能不触发详情接口
-            settings.userAgentString = MOBILE_UA
+            // 关键：必须用**桌面版** UA。
+            // 实测用移动版 UA 时，v.douyin.com 会跳到 iesdouyin.com/share/video/xxx
+            // 这种分享页，数据是服务端直出在 HTML 里的，全程不请求 aweme/detail ——
+            // 拦截器一直等不到东西，最后只能超时。换成桌面 UA 后才会跳转到
+            // www.douyin.com/video/xxx，走真实接口（Windows 端用桌面浏览器正是
+            // 因此才拦得到）。
+            settings.userAgentString = DESKTOP_UA
+            // 配合桌面 UA：按桌面宽度渲染，否则窄视口会让页面切回移动版结构
+            settings.useWideViewPort = true
+            settings.loadWithOverviewMode = true
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(
                     view: WebView,
@@ -129,7 +137,7 @@ class DouyinActivity : Activity() {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 15_000
             readTimeout = 15_000
-            setRequestProperty("User-Agent", MOBILE_UA)
+            setRequestProperty("User-Agent", DESKTOP_UA)
             // 抖音的 CDN 与接口都会校验 Referer
             setRequestProperty("Referer", "https://www.douyin.com/")
             // 登录态在 WebView 的 Cookie 里，必须带上，否则接口会返回未登录
@@ -163,9 +171,16 @@ class DouyinActivity : Activity() {
 
         private const val TIMEOUT_MS = 45_000L
 
-        private const val MOBILE_UA =
-            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+        /**
+         * 与页面同款的桌面版 UA。
+         *
+         * 补发请求时必须与 WebView 用同一个 UA：抖音的接口会校验 UA 一致性，
+         * 而且签名参数（a_bogus）是按桌面版页面算的，用移动版 UA 去请求会被拒。
+         * 这个值也与 Windows 端 douyin_fallback.py 里浏览器用的 UA 保持一致。
+         */
+        private const val DESKTOP_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
         fun intent(context: Context, url: String): Intent =
             Intent(context, DouyinActivity::class.java).putExtra(EXTRA_URL, url)
