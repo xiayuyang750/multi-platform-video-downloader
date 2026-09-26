@@ -41,6 +41,14 @@
             android:name=".ProbeActivity"
             android:exported="false"
             android:label="引擎自检" />
+
+        <!-- 抖音的浏览器模式解析页：单独开一个 Activity 是因为 WebView 需要
+             一个宿主窗口，解析完把结果 setResult 回传并关闭。 -->
+        <activity
+            android:name=".DouyinActivity"
+            android:exported="false"
+            android:label="浏览器模式解析"
+            android:theme="@style/Theme.Ytdlp" />
     </application>
 
 </manifest>

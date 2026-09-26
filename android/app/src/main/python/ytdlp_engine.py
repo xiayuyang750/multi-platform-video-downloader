@@ -555,19 +555,60 @@ class Engine:
         }
 
     def _parse_douyin(self, url: str, ytdlp_err: str) -> dict:
-        """抖音备用链路。
+        """抖音：本层只负责「举手」，真正取数交给 Kotlin 侧的 WebView。
 
-        Windows 端用 DrissionPage 驱动本机浏览器监听接口响应；安卓上没有
-        这个能力，只能换成 WebView —— 那是阶段 5 的活，这里先如实报错，
-        不假装能解析。
+        为什么必须换实现：Windows 端靠 DrissionPage 驱动本机浏览器监听
+        aweme/detail 接口响应，安卓上没有这个能力。但 WebView 本身就是浏览器，
+        用它的 shouldInterceptRequest 拦下同一个接口、再用原生 HTTP 补一次
+        请求即可拿到响应体 —— 分工是「Kotlin 取数、Python 落库」，
+        因为 WebView 只有 Kotlin 侧能用，而库和后续下载都在这一层。
+
+        need_webview 就是两边约定的信号：界面看到它就拉起抖音解析页。
         """
         return {
             "ok": False,
+            "need_webview": True,
+            "platform": "抖音",
+            "source_url": url,
             "error": (
-                "抖音解析失败。yt-dlp 走不通是因为它需要 a_bogus 签名和登录态，"
-                "而这个环节在当前版本里还没有接入安卓端的备用链路。\n\n"
+                "抖音需要「浏览器模式」解析。yt-dlp 走不通的原因是它需要 a_bogus "
+                "签名和登录态，HTTP 客户端两样都拿不到。\n\n"
                 f"原始报错：{friendly_error(ytdlp_err)}"
             ),
+        }
+
+    def save_douyin(self, payload_json: str) -> dict:
+        """接收 Kotlin 侧 WebView 取到的抖音数据，转成统一记录并入库。
+
+        返回结构与 parse_url 成功时一致，界面无需区别对待这两条路径。
+        """
+        data = json.loads(payload_json)
+        url = (data.get("source_url") or "").strip()
+        rec = {
+            "id": str(data.get("id") or url),
+            "platform": "抖音",
+            "title": data.get("title") or "",
+            "uploader": data.get("uploader") or "",
+            "uploader_id": data.get("uploader_id") or "",
+            "duration": data.get("duration"),
+            "thumbnail": data.get("thumbnail") or "",
+            "source_url": url,
+            # 能直接放进播放器的那条（H.264 + 完整 mp4）
+            "resolved_url": data.get("play_url") or "",
+            # 画质最高的那条（可能是 H.265，能下不能播）
+            "download_url": data.get("download_url") or "",
+            "resolved_at": int(time.time()),
+            # 抖音直链实测返回 206 + video/mp4，支持 Range，可直接内联播放
+            "play_kind": "progressive",
+        }
+        self.store.upsert(rec)
+        return {
+            "ok": True,
+            **rec,
+            "quality": "原始画质（无水印）",
+            "filesize": "",
+            # 界面据此提示用户「用的是浏览器模式」，解释为什么要多等一会儿
+            "via": "browser",
         }
 
     def _parse_x(self, url: str, ytdlp_err: str) -> dict:
@@ -909,3 +950,8 @@ def clear_history(platform: str) -> str:
 
 def clear_all_history() -> str:
     return json.dumps(_get().clear_all_history(), ensure_ascii=False)
+
+
+def save_douyin(payload_json: str) -> str:
+    """由 Kotlin 侧的 WebView 解析页调用：把取到的抖音数据入库并回传记录。"""
+    return json.dumps(_get().save_douyin(payload_json), ensure_ascii=False)

@@ -18,12 +18,18 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** 解析页的状态。四态互斥，用 sealed 比「一个 result + 一堆 bool」更难写错。 */
+/** 解析页的状态。各态互斥，用 sealed 比「一个 result + 一堆 bool」更难写错。 */
 sealed interface ParseUi {
     data object Idle : ParseUi
     data object Loading : ParseUi
     data class Done(val video: Video) : ParseUi
     data class Failed(val message: String) : ParseUi
+
+    /**
+     * 需要走浏览器模式（目前只有抖音）。
+     * 界面收到它就去拉起 DouyinActivity，解析完再回调 onDouyinResult。
+     */
+    data class NeedBrowser(val url: String, val message: String) : ParseUi
 }
 
 /** 历史页的状态。platform 为 null 表示「全部」标签。 */
@@ -116,6 +122,44 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     is Engine.ParseResult.Ok -> {
                         // 解析成功会把记录写进历史库，这里顺手刷新，
                         // 用户切到历史页就能看到，不用手动下拉
+                        refreshHistory()
+                        ParseUi.Done(r.info)
+                    }
+                    is Engine.ParseResult.Err -> if (r.needWebview) {
+                        // 抖音：交给界面的 WebView 解析页继续
+                        ParseUi.NeedBrowser(target, r.message)
+                    } else {
+                        ParseUi.Failed(r.message)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 抖音 WebView 解析页返回后的回调。
+     *
+     * @param payloadJson 取到的数据（null 表示没取到）
+     * @param reason 没取到时的原因，由解析页给出
+     */
+    fun onDouyinResult(payloadJson: String?, reason: String) {
+        if (payloadJson == null) {
+            _parse.value = ParseUi.Failed(
+                reason.ifBlank { "浏览器模式没能取到视频数据。" }
+            )
+            return
+        }
+        _parse.value = ParseUi.Loading
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { Engine.saveDouyin(ctx, payloadJson) }
+            }
+            _parse.value = when {
+                result.isFailure -> ParseUi.Failed(
+                    "入库失败：${result.exceptionOrNull()?.message ?: "未知错误"}"
+                )
+                else -> when (val r = result.getOrThrow()) {
+                    is Engine.ParseResult.Ok -> {
                         refreshHistory()
                         ParseUi.Done(r.info)
                     }

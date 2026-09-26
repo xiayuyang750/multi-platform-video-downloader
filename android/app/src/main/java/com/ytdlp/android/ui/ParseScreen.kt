@@ -1,5 +1,7 @@
 package com.ytdlp.android.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,17 +27,20 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.ytdlp.android.DouyinActivity
 
 /** 解析页：贴链接 → 出结果 → 下载。对应网页端的第一个视图。 */
 @Composable
@@ -44,6 +49,18 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
     val parse by vm.parse.collectAsStateWithLifecycle()
     val download by vm.download.collectAsStateWithLifecycle()
     val uriHandler = LocalUriHandler.current
+    val context = LocalContext.current
+
+    // 抖音的浏览器模式解析页。它是个独立 Activity（WebView 需要窗口），
+    // 解析完通过 setResult 把数据交回来。
+    val douyinLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        vm.onDouyinResult(
+            result.data?.getStringExtra(DouyinActivity.EXTRA_PAYLOAD),
+            result.data?.getStringExtra(DouyinActivity.EXTRA_REASON).orEmpty(),
+        )
+    }
 
     Column(
         modifier
@@ -138,6 +155,32 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                     lineHeight = 22.sp,
                     color = tone.danger,
                 )
+            }
+
+            is ParseUi.NeedBrowser -> {
+                // 抖音要走浏览器模式：立刻拉起那个 WebView 页面。
+                // 用 url 做 key，避免重组时反复拉起。
+                LaunchedEffect(state.url) {
+                    douyinLauncher.launch(DouyinActivity.intent(context, state.url))
+                }
+                Card {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(Dim.gap),
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = tone.accent,
+                        )
+                        Text("正在打开浏览器模式…", fontSize = Font.body, color = tone.textMuted)
+                    }
+                    Spacer12()
+                    Hint(
+                        "抖音的接口需要签名和登录态，纯 HTTP 拿不到，所以改用内置浏览器解析。\n" +
+                            "如果页面提示登录，登录后稍等几秒即可。登录状态会保留，下次不用再登。"
+                    )
+                }
             }
 
             is ParseUi.Done -> ResultCard(

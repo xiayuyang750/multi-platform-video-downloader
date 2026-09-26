@@ -79,14 +79,40 @@ object Engine {
 
     sealed interface ParseResult {
         data class Ok(val info: Video) : ParseResult
-        data class Err(val message: String) : ParseResult
+
+        /**
+         * @param needWebview 真表示这个平台要走浏览器模式（抖音）。
+         *   引擎自己取不到数，需要界面拉起 WebView 解析页 —— 这是两边
+         *   约定的信号，见 ytdlp_engine._parse_douyin。
+         */
+        data class Err(
+            val message: String,
+            val needWebview: Boolean = false,
+        ) : ParseResult
     }
 
     fun parseUrl(context: Context, url: String): ParseResult {
         val json = module(context).callAttr("parse_url", url).toString()
         val obj = JSONObject(json)
         if (!obj.optBoolean("ok")) {
-            return ParseResult.Err(obj.optString("error").ifBlank { "解析失败" })
+            return ParseResult.Err(
+                message = obj.optString("error").ifBlank { "解析失败" },
+                needWebview = obj.optBoolean("need_webview"),
+            )
+        }
+        return ParseResult.Ok(Video.fromParseResult(obj))
+    }
+
+    /**
+     * 把 Kotlin 侧 WebView 取到的抖音数据交给引擎入库，返回统一记录。
+     *
+     * 分工的理由：WebView 只有 Kotlin 侧能用，而历史库和后续下载都在
+     * Python 层，所以由 Kotlin 取数、Python 落库。
+     */
+    fun saveDouyin(context: Context, payloadJson: String): ParseResult {
+        val obj = JSONObject(module(context).callAttr("save_douyin", payloadJson).toString())
+        if (!obj.optBoolean("ok")) {
+            return ParseResult.Err(obj.optString("error").ifBlank { "抖音数据入库失败" })
         }
         return ParseResult.Ok(Video.fromParseResult(obj))
     }
