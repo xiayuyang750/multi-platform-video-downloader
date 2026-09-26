@@ -3,9 +3,11 @@ package com.ytdlp.android.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.ytdlp.android.BuildConfig
 import com.ytdlp.android.engine.Download
 import com.ytdlp.android.engine.Engine
 import com.ytdlp.android.engine.Settings
+import com.ytdlp.android.engine.UpdateChecker
 import com.ytdlp.android.engine.Video
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -52,6 +54,15 @@ data class SettingsUi(
     /** 一次性提示（如「目录已更新」），显示后由界面调 consumeNotice 清掉 */
     val notice: String? = null,
 )
+
+/** 检查更新的状态。失败原因由 UpdateChecker 侧翻译成中文，界面直接用。 */
+sealed interface UpdateUi {
+    data object Idle : UpdateUi
+    data object Checking : UpdateUi
+    data class Available(val version: String, val url: String, val notes: String) : UpdateUi
+    data object UpToDate : UpdateUi
+    data class Failed(val reason: String) : UpdateUi
+}
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -313,5 +324,45 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun consumeNotice() {
         _settings.value = _settings.value.copy(notice = null)
+    }
+
+    // ---- 检查更新 ----
+
+    private val _update = MutableStateFlow<UpdateUi>(UpdateUi.Idle)
+    val update: StateFlow<UpdateUi> = _update.asStateFlow()
+
+    /**
+     * 检查 GitHub 上的最新版本。
+     *
+     * 网络失败不视为「异常」而是要如实告知的信息 —— 用户要求「因为网络原因
+     * 无法检查同样也是提示告知」，所以每种失败都由 UpdateChecker 给出
+     * 具体的中文原因，这里原样透传给界面。
+     */
+    fun checkUpdate() {
+        if (_update.value is UpdateUi.Checking) return
+        _update.value = UpdateUi.Checking
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { UpdateChecker.check(BuildConfig.VERSION_NAME) }
+                    .getOrElse {
+                        UpdateChecker.Result.Failed(
+                            "检查更新时出错：${it.message ?: it.javaClass.simpleName}"
+                        )
+                    }
+            }
+            _update.value = when (result) {
+                is UpdateChecker.Result.Available -> UpdateUi.Available(
+                    version = result.version,
+                    url = result.downloadUrl,
+                    notes = result.notes,
+                )
+                is UpdateChecker.Result.UpToDate -> UpdateUi.UpToDate
+                is UpdateChecker.Result.Failed -> UpdateUi.Failed(result.reason)
+            }
+        }
+    }
+
+    fun dismissUpdate() {
+        _update.value = UpdateUi.Idle
     }
 }

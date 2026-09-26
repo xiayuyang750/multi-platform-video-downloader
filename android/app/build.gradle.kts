@@ -22,7 +22,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "0.1"
+        versionName = "1.0.0"
 
         ndk {
             // Chaquopy 的 Python 解释器是原生组件，必须显式声明 ABI。
@@ -43,6 +43,8 @@ android {
         // 若它同时内置了 Compose 编译器，就不该再声明
         // org.jetbrains.kotlin.plugin.compose，否则会撞版本。
         compose = true
+        // 检查更新要读 BuildConfig.VERSION_NAME 做版本比较
+        buildConfig = true
     }
 
     compileOptions {

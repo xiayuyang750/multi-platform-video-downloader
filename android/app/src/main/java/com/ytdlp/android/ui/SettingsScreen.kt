@@ -20,9 +20,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.ytdlp.android.BuildConfig
 import com.ytdlp.android.ProbeActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -33,7 +36,9 @@ import java.io.File
 @Composable
 fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
     val state by vm.settings.collectAsStateWithLifecycle()
+    val update by vm.update.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
     val scope = rememberCoroutineScope()
 
     // Cookie 用系统文件选择器挑，但**不**把 SAF 的 URI 交给引擎 ——
@@ -169,6 +174,77 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 },
                 modifier = Modifier.fillMaxWidth(),
             )
+        }
+
+        // ---- 版本更新 ----
+        Card {
+            FieldLabel("版本更新")
+            Spacer12()
+            Text(
+                "当前版本 ${BuildConfig.VERSION_NAME}",
+                fontSize = Font.meta,
+                color = tone.textMuted,
+            )
+
+            when (val u = update) {
+                is UpdateUi.Checking -> {
+                    Spacer12()
+                    Text("正在检查…", fontSize = Font.meta, color = tone.textMuted)
+                }
+
+                is UpdateUi.Available -> {
+                    Spacer12()
+                    Text(
+                        "发现新版本 ${u.version}",
+                        fontSize = Font.body,
+                        fontWeight = FontWeight.SemiBold,
+                        color = tone.accent,
+                    )
+                    if (u.notes.isNotBlank()) {
+                        Spacer12()
+                        // 版本说明可能很长，截断到 300 字，避免把设置页撑爆
+                        Hint(u.notes.take(300))
+                    }
+                    Spacer12()
+                    GhostButton(
+                        text = "前往下载",
+                        onClick = { uriHandler.openUriSafe(u.url) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+
+                is UpdateUi.UpToDate -> {
+                    Spacer12()
+                    Text(
+                        "已是最新版本",
+                        fontSize = Font.meta,
+                        color = tone.accent,
+                    )
+                }
+
+                is UpdateUi.Failed -> {
+                    Spacer12()
+                    // 网络失败也如实说明原因（用户明确要求），不要吞掉
+                    Text(
+                        u.reason,
+                        fontSize = Font.meta,
+                        lineHeight = 20.sp,
+                        color = tone.danger,
+                    )
+                }
+
+                is UpdateUi.Idle -> Unit
+            }
+
+            Spacer12()
+            GhostButton(
+                text = if (update is UpdateUi.Checking) "检查中…" else "检查更新",
+                onClick = vm::checkUpdate,
+                enabled = update !is UpdateUi.Checking,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer12()
+            Hint("从项目的 GitHub Releases 读取最新版本。国内直连 GitHub 通常不通，需要开启代理。")
         }
 
         // ---- 关于 ----
