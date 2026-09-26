@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "_note": "安卓端默认配置规格。键名与 windows/config/defaults.json 一一对应 —— 两端是同一份规格的两个实现，改一处要同步另一处。",
+  "_platform_note": "安卓端拿不到、也不需要的 Windows 专有项：output_dir（设备相关，由 Kotlin 在启动时注入）、ffmpeg_dir / js_runtimes（安卓上必须是应用原生库目录的绝对路径，同样运行时注入）、--windows-filenames / -P / --print（命令行专用，改为 yt-dlp 的 Python 参数）。",
+
+  "download": {
+    "filename_template": "%(title)s [%(id)s].%(ext)s",
+    "single_video_no_playlist": true
+  },
+
+  "engine": {
+    "concurrent_fragments": 8,
+    "socket_timeout": 20
+  },
+
+  "cookies": {
+    "note": "Netscape 格式 cookies.txt 的路径。由系统文件选择框选定后拷进应用私有目录，路径交给 Kotlin 写进设置。只给下面标记 use_cookies=true 的平台使用 —— 实测给 YouTube 带 cookie 会把画质从 1080p 降到 360p。"
+  },
+
+  "platform_rules": {
+    "youtube.com": { "use_cookies": false, "reason": "实测带 cookie 会把画质从 1080p 降到 360p（format 18）" },
+    "youtu.be": { "use_cookies": false, "reason": "同上，短链同属 YouTube" },
+    "bilibili.com": { "use_cookies": false, "reason": "实测带与不带都可用，不带更简单" },
+    "x.com": { "use_cookies": true, "reason": "X(Twitter) 对未登录访问限制严格，不带 cookie 会报「No video could be found in this tweet」；带 cookie 实测可解析出 1080p" },
+    "twitter.com": { "use_cookies": true, "reason": "同上" },
+    "instagram.com": { "use_cookies": true, "reason": "Instagram 需要登录态，未登录会要求 fresh cookies" },
+    "douyin.com": { "use_cookies": false, "status": "webview", "reason": "yt-dlp 走不通（须 a_bogus 签名 + 登录态）。安卓端改用 WebView 监听接口响应拿无水印直链，不需要 cookie" }
+  }
+}
