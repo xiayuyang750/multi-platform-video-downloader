@@ -5,47 +5,76 @@ import android.os.Build
 import android.os.Bundle
 import android.system.Os
 import android.system.OsConstants
+import android.widget.ScrollView
 import android.widget.TextView
+import com.chaquo.python.Python
+import com.chaquo.python.android.AndroidPlatform
 
 /**
- * 阶段 1 的自检页：不接任何业务，只把与兼容性判断相关的设备信息显示出来。
+ * 阶段 1 的验证页：不接业务，只回答两个必须先确认的问题。
  *
- * 之所以先做这一屏，是因为整个安卓端方案有两个前提必须先确认：
- *   1. 构建链路（AGP / Gradle / SDK / JDK）能在本机跑通并装到真机；
- *   2. 真机的 ABI 与**内存页大小**符合预期 —— Android 15 起部分设备用
- *      16KB 页，原生库（libpython、ffmpeg、JS 运行时）没做 16KB 对齐会直接崩。
- * 这两点没确认之前，写界面和业务都是空中楼阁。
+ *   1. 设备侧条件 —— Android 版本、ABI、**内存页大小**。Android 15 起部分设备用
+ *      16KB 页，原生库（libpython / ffmpeg / JS 运行时）没做 16KB 对齐会直接崩，
+ *      所以这个值必须先看到。
+ *   2. 引擎侧条件 —— 嵌入的 CPython 能否起来、yt-dlp 能否真的解析出视频信息。
+ *      这一条不成立，后面的界面和业务都是空中楼阁。
  */
 class MainActivity : Activity() {
+
+    private lateinit var logView: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val pageSizeKb = Os.sysconf(OsConstants._SC_PAGESIZE) / 1024
+        logView = TextView(this).apply {
+            textSize = 14f
+            setPadding(48, 110, 48, 48)
+        }
+        setContentView(ScrollView(this).apply { addView(logView) })
 
-        val info = buildString {
-            appendLine("环境自检")
-            appendLine()
-            appendLine("Android 版本：${Build.VERSION.RELEASE}（API ${Build.VERSION.SDK_INT}）")
-            appendLine("设备型号：${Build.MANUFACTURER} ${Build.MODEL}")
-            appendLine("支持 ABI：${Build.SUPPORTED_ABIS.joinToString(", ")}")
-            appendLine("内存页大小：${pageSizeKb} KB")
-            appendLine()
-            appendLine(
-                if (pageSizeKb >= 16) {
-                    "注意：这是 16KB 页设备，所有原生库必须做 16KB 对齐。"
-                } else {
-                    "这是 4KB 页设备，原生库对齐压力较小。"
+        append(deviceInfo())
+        append("\n正在启动内嵌 Python 引擎…\n")
+
+        // Python 初始化和网络解析都不能在主线程做，否则界面直接卡死。
+        Thread {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(AndroidPlatform(this))
                 }
+                append("CPython 已启动\n")
+                val module = Python.getInstance().getModule("ytdlp_bridge")
+
+                append("【子进程能力体检】")
+                append(module.callAttr("selftest").toString())
+
+                append("【解析测试】\n$TEST_URL")
+                append(module.callAttr("probe", TEST_URL).toString())
+            } catch (exc: Exception) {
+                append("失败：${exc.javaClass.simpleName}: ${exc.message}")
+            }
+        }.start()
+    }
+
+    private fun deviceInfo(): String {
+        val pageSizeKb = Os.sysconf(OsConstants._SC_PAGESIZE) / 1024
+        return buildString {
+            appendLine("环境自检")
+            appendLine("Android：${Build.VERSION.RELEASE}（API ${Build.VERSION.SDK_INT}）")
+            appendLine("设备：${Build.MANUFACTURER} ${Build.MODEL}")
+            appendLine("ABI：${Build.SUPPORTED_ABIS.joinToString(", ")}")
+            appendLine("内存页：${pageSizeKb} KB")
+            append(
+                if (pageSizeKb >= 16) "→ 16KB 页设备，原生库必须 16KB 对齐"
+                else "→ 4KB 页设备"
             )
         }
+    }
 
-        setContentView(
-            TextView(this).apply {
-                text = info
-                textSize = 15f
-                setPadding(56, 120, 56, 56)
-            }
-        )
+    private fun append(text: String) {
+        runOnUiThread { logView.append("\n$text") }
+    }
+
+    private companion object {
+        const val TEST_URL = "https://www.bilibili.com/video/BV1ckhW6DErb/"
     }
 }
