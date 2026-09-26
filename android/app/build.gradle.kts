@@ -4,11 +4,17 @@ plugins {
     // for Kotlin support since AGP 9.0"。
     id("com.android.application")
     id("com.chaquo.python")
+    // 但 Compose 编译器插件不在 AGP 的内置范围里，必须自己应用，
+    // 否则 buildFeatures.compose 一开就报错。
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
     namespace = "com.ytdlp.android"
-    compileSdk = 36
+    // Compose BOM 2026.09.00 里的库要求 compileSdk ≥ 37，所以这里必须用
+    // 37（只影响编译期能用哪些 API，不改变运行时行为）。
+    // targetSdk 仍留在 36：那是 Android 16 的正式版本号，也是本机的实测版本。
+    compileSdk = 37
     buildToolsVersion = "36.0.0"
 
     defaultConfig {
@@ -30,6 +36,13 @@ android {
         release {
             isMinifyEnabled = false
         }
+    }
+
+    buildFeatures {
+        // 界面用 Compose 写。AGP 9 内置 Kotlin 支持，先只开这个开关 ——
+        // 若它同时内置了 Compose 编译器，就不该再声明
+        // org.jetbrains.kotlin.plugin.compose，否则会撞版本。
+        compose = true
     }
 
     compileOptions {
@@ -59,4 +72,16 @@ chaquopy {
             install("yt-dlp")
         }
     }
+}
+
+dependencies {
+    // 用 BOM 统一 Compose 各库的版本，避免手工对齐一堆版本号
+    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.activity:activity-compose:1.13.0")
+    // 底部导航要的三个图标（解析/历史/设置）在 core 里就有，
+    // 不必引入 extended 那个几 MB 的大包
+    implementation("androidx.compose.material:material-icons-core")
 }

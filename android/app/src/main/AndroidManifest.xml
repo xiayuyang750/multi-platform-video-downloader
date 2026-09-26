@@ -13,12 +13,21 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="@string/app_name">
+            android:label="@string/app_name"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 引擎自检页：不是给用户用的，而是排查引擎问题时的诊断入口。
+             不设 intent-filter，所以桌面看不到图标，只能用
+             adb shell am start -n com.ytdlp.android/.ProbeActivity 启动。 -->
+        <activity
+            android:name=".ProbeActivity"
+            android:exported="false"
+            android:label="引擎自检" />
     </application>
 
 </manifest>
