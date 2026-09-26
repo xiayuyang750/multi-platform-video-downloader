@@ -36,6 +36,16 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    packaging {
+        jniLibs {
+            // 必须让 AGP 把 jniLibs 里的文件解压到应用原生库目录。
+            // 默认 useLegacyPackaging=false 时 .so 会留在 APK 内被直接 mmap，
+            // nativeLibraryDir 下就没有实体文件，我们的 ffmpeg / qjs 这类
+            // 「当作可执行文件调用」的二进制就无从执行。
+            useLegacyPackaging = true
+        }
+    }
 }
 
 chaquopy {

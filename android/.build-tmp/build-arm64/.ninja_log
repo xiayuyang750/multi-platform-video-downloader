@@ -1,0 +1,12 @@
+# ninja log v7
+113	184	8120845281671361	CMakeFiles/qjs_exe.dir/gen/standalone.c.o	bdf3ed8e880f3ca5
+97	193	8120845281500550	CMakeFiles/qjs_exe.dir/gen/repl.c.o	91996d5135fcaf4
+135	613	8120845281872891	CMakeFiles/qjs_exe.dir/qjs.c.o	31f6d0d4bdd30434
+4	740	8120845280574834	CMakeFiles/qjs.dir/dtoa.c.o	1ff59a89df96d83a
+40	942	8120845280936490	CMakeFiles/qjs.dir/libunicode.c.o	15d5f620023f1e9
+21	1226	8120845280743882	CMakeFiles/qjs.dir/libregexp.c.o	a452422c5731ec6c
+77	1404	8120845281305167	CMakeFiles/qjs-libc.dir/quickjs-libc.c.o	33f428da2df53786
+60	17461	8120845281132519	CMakeFiles/qjs.dir/quickjs.c.o	cc120dc5534c092d
+17461	18888	8120845455143698	libqjs.a	dd656e21be6fdd5c
+18888	19037	8120845469413365	libqjs-libc.a	9e448bde0acb3536
+19039	19222	8120845470925678	qjs	a0afef33c8d2f945

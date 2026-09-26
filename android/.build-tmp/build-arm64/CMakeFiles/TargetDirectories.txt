@@ -1,0 +1,11 @@
+D:/Project/yt-dIp/android/.build-tmp/build-arm64/CMakeFiles/qjs.dir
+D:/Project/yt-dIp/android/.build-tmp/build-arm64/CMakeFiles/qjs-libc.dir
+D:/Project/yt-dIp/android/.build-tmp/build-arm64/CMakeFiles/qjsc.dir
+D:/Project/yt-dIp/android/.build-tmp/build-arm64/CMakeFiles/qjs_exe.dir
+D:/Project/yt-dIp/android/.build-tmp/build-arm64/CMakeFiles/run-test262.dir
+D:/Project/yt-dIp/android/.build-tmp/build-arm64/CMakeFiles/api-test.dir
+D:/Project/yt-dIp/android/.build-tmp/build-arm64/CMakeFiles/lre-test.dir
+D:/Project/yt-dIp/android/.build-tmp/build-arm64/CMakeFiles/unicode_gen.dir
+D:/Project/yt-dIp/android/.build-tmp/build-arm64/CMakeFiles/function_source.dir
+D:/Project/yt-dIp/android/.build-tmp/build-arm64/CMakeFiles/edit_cache.dir
+D:/Project/yt-dIp/android/.build-tmp/build-arm64/CMakeFiles/rebuild_cache.dir

@@ -9,6 +9,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
+import java.io.File
 
 /**
  * 阶段 1 的验证页：不接业务，只回答两个必须先确认的问题。
@@ -47,8 +48,14 @@ class MainActivity : Activity() {
                 append("【子进程能力体检】")
                 append(module.callAttr("selftest").toString())
 
-                append("【解析测试】\n$TEST_URL")
-                append(module.callAttr("probe", TEST_URL).toString())
+                // 自带的 ffmpeg 被 AGP 打进 jniLibs，安装后落在应用原生库目录，
+                // 只有这个位置在 Android 10+ 上允许执行二进制（应用数据目录是 noexec）。
+                val ffmpeg = File(applicationInfo.nativeLibraryDir, "libffmpeg.so").absolutePath
+                val outDir = File(filesDir, "dl").absolutePath
+
+                append("【阶段1c：下载 + 合流】已单独验证通过\nffmpeg=$ffmpeg")
+                append("【阶段1d：子进程稳定性压测】各调用 30 次")
+                append(module.callAttr("subprocess_stress", ffmpeg, 30).toString())
             } catch (exc: Exception) {
                 append("失败：${exc.javaClass.simpleName}: ${exc.message}")
             }
