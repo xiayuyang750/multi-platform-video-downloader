@@ -88,4 +88,17 @@ dependencies {
     // 底部导航要的三个图标（解析/历史/设置）在 core 里就有，
     // 不必引入 extended 那个几 MB 的大包
     implementation("androidx.compose.material:material-icons-core")
+
+    // 播放器。用 Media3 的 ExoPlayer：它是系统级组件，硬解、音轨切换、
+    // 各种容器格式都由系统兜底，比自己写 MediaPlayer 省心。
+    implementation("androidx.media3:media3-exoplayer:1.11.1")
+    implementation("androidx.media3:media3-ui:1.11.1")
+
+    // 封面图加载。用 Coil2（io.coil-kt）而不是 Coil3（io.coil-kt.coil3）：
+    // Coil3 是 Kotlin Multiplatform 库，会带进 kotlin-stdlib 2.4.x 和
+    // JetBrains 那套 org.jetbrains.compose，而本项目用的是 androidx Compose
+    // 且编译器是 AGP 内置的 Kotlin 2.2 —— 两套体系撞在一起会报
+    // "Module was compiled with an incompatible version of Kotlin"。
+    // Coil2 是纯 Android 库，依赖 androidx.compose，与本项目同源。
+    implementation("io.coil-kt:coil-compose:2.7.0")
 }

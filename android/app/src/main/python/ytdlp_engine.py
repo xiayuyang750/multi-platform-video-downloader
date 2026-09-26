@@ -215,11 +215,23 @@ class Store:
                 resolved_at  INTEGER,
                 play_kind    TEXT,
                 uploader_id  TEXT,
-                download_url TEXT
+                download_url TEXT,
+                local_path   TEXT
             )
             """
         )
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(history)")}
+        # 下载产物的落地路径。有它历史页才能直接播本地文件 —— 这一点比
+        # 「在线播放直链」更有价值：B站/YouTube 早已全面 DASH 化（实测
+        # YouTube 53 个格式里 0 个音视频合一，B站 也全是 audio only +
+        # video only），拿不到能直连播放的地址，于是「下载后在本机看」
+        # 才是这两类站点唯一的播放途径。
+        if "local_path" not in cols:
+            self.conn.execute("ALTER TABLE history ADD COLUMN local_path TEXT")
 
     def upsert(self, rec: dict) -> None:
         with self._write_lock:
@@ -267,6 +279,19 @@ class Store:
     def clear_all(self) -> None:
         with self._write_lock:
             self.conn.execute("DELETE FROM history")
+            self.conn.commit()
+
+    def set_local_path(self, source_url: str, path: str) -> None:
+        """记下某条历史的下载产物路径，供界面直接播放本地文件。
+
+        按 source_url 匹配而不是按下载用的地址：走备用链路时（抖音直链、
+        X 直链）真正下载的是直链，而库里存的是用户最初贴的那个分享链接。
+        """
+        with self._write_lock:
+            self.conn.execute(
+                "UPDATE history SET local_path = ? WHERE source_url = ?",
+                (path, source_url),
+            )
             self.conn.commit()
 
 
@@ -696,6 +721,11 @@ class Engine:
             with _YDL(opts) as ydl:
                 info = ydl.extract_info(target, download=True) or {}
                 path = self._final_path(info, ydl)
+
+            # 把产物路径记进历史：历史页据此提供「播放本地文件」——
+            # 对 B站/YouTube 这类纯 DASH 站点，这是唯一能看的方式
+            if path:
+                self.store.set_local_path(url, path)
 
             self.dl_state.update(type="done", active=False, path=path,
                                  message="", percent=100.0)

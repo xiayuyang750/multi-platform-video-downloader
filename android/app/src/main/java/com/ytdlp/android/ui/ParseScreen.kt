@@ -142,7 +142,7 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
 
             is ParseUi.Done -> ResultCard(
                 video = state.video,
-                downloading = download.active,
+                download = download,
                 onDownload = vm::startDownload,
                 onOpenSource = { uriHandler.openUriSafe(state.video.sourceUrl) },
             )
@@ -153,7 +153,7 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
 @Composable
 private fun ResultCard(
     video: com.ytdlp.android.engine.Video,
-    downloading: Boolean,
+    download: com.ytdlp.android.engine.Download,
     onDownload: () -> Unit,
     onOpenSource: () -> Unit,
 ) {
@@ -206,38 +206,18 @@ private fun ResultCard(
 
         Spacer(Modifier.height(Dim.gapLg))
 
-        // 播放区占位。阶段 4 会换成 Media3 播放器；现在先把「有没有可播直链」
-        // 这件事说清楚 —— B站等 DASH 站点解析出来的是分轨流，没有音视频合一的
-        // 直链，需要下载合流后才能看，这个区别要让用户知道，否则会以为是坏了。
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f)
-                .clip(RoundedCornerShape(Dim.radiusSm))
-                .background(tone.surfaceHover),
-            contentAlignment = Alignment.Center,
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(Dim.gapSm),
-            ) {
-                PlatformBadge(video.platform, size = 36)
-                Text(
-                    if (video.playable) "播放功能将在后续版本接入"
-                    else "该站点是音视频分轨流，需下载后才能播放",
-                    fontSize = Font.hint,
-                    color = tone.textMuted,
-                )
-            }
-        }
+        // 封面 + 播放器。下载完成后直接用产物文件播放 —— 对 B站/YouTube
+        // 这类纯 DASH 站点，在线直链根本不存在，本地文件是唯一能看的方式。
+        val justDownloaded = download.path.takeIf { download.isDone && it.isNotBlank() }
+        PlayerBox(video, source = justDownloaded ?: video.playSource)
 
         Spacer(Modifier.height(Dim.gapLg))
 
         Row(horizontalArrangement = Arrangement.spacedBy(Dim.gap)) {
             PrimaryButton(
-                text = if (downloading) "下载中…" else "下载",
+                text = if (download.active) "下载中…" else "下载",
                 onClick = onDownload,
-                enabled = !downloading,
+                enabled = !download.active,
                 modifier = Modifier.weight(1f),
             )
             GhostButton(
@@ -247,13 +227,4 @@ private fun ResultCard(
             )
         }
     }
-}
-
-/** LocalUriHandler.openUri 在链接无法处理时会抛异常，包一层。
- *
- * 真实存在的情况：设备上没装浏览器、或链接是被系统拦截的 scheme，
- * 不包这一层就是直接崩。 */
-private fun androidx.compose.ui.platform.UriHandler.openUriSafe(url: String) {
-    if (url.isBlank()) return
-    runCatching { openUri(url) }
 }

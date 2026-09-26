@@ -110,7 +110,16 @@ object Engine {
 
     fun history(context: Context): List<Video> {
         val arr = JSONArray(module(context).callAttr("get_history").toString())
-        return (0 until arr.length()).map { Video.fromRow(arr.getJSONObject(it)) }
+        return (0 until arr.length()).map { i ->
+            val v = Video.fromRow(arr.getJSONObject(i))
+            // 本地文件可能已被用户用文件管理器删掉。在这里（IO 线程）统一
+            // 校验一次并清掉失效路径，界面层就不必反复 stat 磁盘。
+            if (v.localPath.isNotBlank() && !File(v.localPath).exists()) {
+                v.copy(localPath = "")
+            } else {
+                v
+            }
+        }
     }
 
     fun deleteHistory(context: Context, id: String) {
@@ -161,14 +170,37 @@ data class Video(
     val downloadUrl: String,
     val resolvedAt: Long,
     val playKind: String,
+    /** 下载产物的本地路径。有它就能直接播本地文件 ——
+     *  对 B站/YouTube 这类纯 DASH 站点这是唯一能看的方式。 */
+    val localPath: String = "",
     /** 以下两项只有解析结果有，历史记录里为空 */
     val quality: String = "",
     val filesize: String = "",
     /** 非空表示走的是备用链路（抖音浏览器模式 / X 第三方服务） */
     val via: String = "",
 ) {
-    /** 有没有可以直连播放的地址。空的话界面要说明为什么播不了。 */
+    /** 有没有可以直连播放的在线地址。空的话界面要说明为什么播不了。 */
     val playable: Boolean get() = resolvedUrl.isNotBlank() && playKind == "progressive"
+
+    /**
+     * 本地文件是否还在。
+     *
+     * 这里只做「有没有记录」的判断，不 stat 磁盘 —— 历史记录在
+     * Engine.history() 里已经统一校验过一遍（那里在 IO 线程），
+     * 界面层不该再做文件 IO。
+     */
+    val hasLocalFile: Boolean get() = localPath.isNotBlank()
+
+    /** 最优先的播放源：本地文件优先于在线直链。
+     *
+     * 本地文件不怕「直链过期」——B站等站点的直链带时效，隔一段时间就失效，
+     * 而本地文件一直在。 */
+    val playSource: String?
+        get() = when {
+            hasLocalFile -> localPath
+            playable -> resolvedUrl
+            else -> null
+        }
 
     companion object {
         fun fromParseResult(o: JSONObject) = Video(
@@ -202,6 +234,7 @@ data class Video(
             downloadUrl = o.optString("download_url"),
             resolvedAt = o.optLong("resolved_at"),
             playKind = o.optString("play_kind"),
+            localPath = o.optString("local_path"),
         )
     }
 }

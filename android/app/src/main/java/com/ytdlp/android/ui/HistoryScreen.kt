@@ -28,21 +28,27 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ytdlp.android.engine.Video
 
-/** 历史页：按平台筛选 + 列表。对应网页端的第二个视图。 */
+/** 历史页：按平台筛选 + 列表 + 点开展开播放。对应网页端的第二个视图。 */
 @Composable
 fun HistoryScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
     val history by vm.history.collectAsStateWithLifecycle()
     var confirmClear by remember { mutableStateOf(false) }
+    // 只允许展开一条：每条展开都会起一个 ExoPlayer 实例，同时展开多个
+    // 会白占解码器（而且用户也不可能同时看两个）
+    var expandedId by rememberSaveable { mutableStateOf<String?>(null) }
+    val uriHandler = LocalUriHandler.current
 
     Column(modifier.fillMaxSize()) {
 
@@ -131,7 +137,15 @@ fun HistoryScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 verticalArrangement = Arrangement.spacedBy(Dim.gapSm),
             ) {
                 items(history.visible, key = { it.id }) { video ->
-                    HistoryRow(video, onDelete = { vm.deleteHistory(video) })
+                    HistoryItem(
+                        video = video,
+                        expanded = expandedId == video.id,
+                        onToggle = {
+                            expandedId = if (expandedId == video.id) null else video.id
+                        },
+                        onOpenSource = { uriHandler.openUriSafe(video.sourceUrl) },
+                        onDelete = { vm.deleteHistory(video) },
+                    )
                 }
             }
         }
@@ -189,52 +203,88 @@ private fun FilterChip(label: String, count: Int, active: Boolean, onClick: () -
     }
 }
 
-/** 一条历史记录（折叠态）。 */
+/** 一条历史记录：折叠时只有一行，点开后向下展开播放区。 */
 @Composable
-private fun HistoryRow(video: Video, onDelete: () -> Unit) {
-    Row(
+private fun HistoryItem(
+    video: Video,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onOpenSource: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Column(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Dim.radius))
             .background(tone.surface)
             .border(1.dp, tone.border, RoundedCornerShape(Dim.radius))
-            .padding(start = Dim.cardPadding, end = 4.dp, top = 12.dp, bottom = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(Dim.gap),
     ) {
-        PlatformBadge(video.platform)
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onToggle)
+                .padding(start = Dim.cardPadding, end = 4.dp, top = 12.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(Dim.gap),
+        ) {
+            PlatformBadge(video.platform)
 
-        Column(Modifier.weight(1f)) {
-            Text(
-                video.title.ifBlank { "（无标题）" },
-                fontSize = Font.body,
-                fontWeight = FontWeight.Medium,
-                color = tone.text,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.height(2.dp))
-            Text(
-                buildString {
-                    if (video.uploader.isNotBlank()) append(video.uploader).append(" · ")
-                    append(formatDuration(video.duration).ifBlank { "时长未知" })
-                    append(" · ")
-                    append(formatRelativeTime(video.resolvedAt))
-                },
-                fontSize = Font.hint,
-                color = tone.textMuted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    video.title.ifBlank { "（无标题）" },
+                    fontSize = Font.body,
+                    fontWeight = FontWeight.Medium,
+                    color = tone.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    buildString {
+                        if (video.uploader.isNotBlank()) append(video.uploader).append(" · ")
+                        append(formatDuration(video.duration).ifBlank { "时长未知" })
+                        append(" · ")
+                        append(formatRelativeTime(video.resolvedAt))
+                        // 已下载的标注一下，用户一眼能看出哪些能离线看
+                        if (video.hasLocalFile) append(" · 已下载")
+                    },
+                    fontSize = Font.hint,
+                    color = if (video.hasLocalFile) tone.accent else tone.textMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            IconButton(onClick = onDelete, modifier = Modifier.size(Dim.touchTarget)) {
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = "删除这条记录",
+                    tint = tone.textMuted,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
         }
 
-        IconButton(onClick = onDelete, modifier = Modifier.size(Dim.touchTarget)) {
-            Icon(
-                Icons.Default.Delete,
-                contentDescription = "删除这条记录",
-                tint = tone.textMuted,
-                modifier = Modifier.size(20.dp),
-            )
+        if (expanded) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(start = Dim.cardPadding, end = Dim.cardPadding, bottom = Dim.cardPadding),
+                verticalArrangement = Arrangement.spacedBy(Dim.gap),
+            ) {
+                PlayerBox(video)
+                if (video.playSource == null) {
+                    Hint(
+                        "该站点解析出的是音视频分离的流（B站、YouTube 等都已全面 DASH 化），" +
+                            "没有可直连播放的地址。下载后这里就能直接播放本地文件。"
+                    )
+                }
+                GhostButton(
+                    text = "打开原视频",
+                    onClick = onOpenSource,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
     }
 }

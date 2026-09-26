@@ -204,11 +204,3 @@ fun YtdlpTheme(
         MaterialTheme(colorScheme = scheme, typography = typography, content = content)
     }
 }
-
-/** 网页端 .result-error 的样式：整行红字、保留换行、可直接选中复制。 */
-@Composable
-fun errorTextStyle() = TextStyle(
-    fontSize = Font.meta,
-    lineHeight = 22.sp,
-    color = tone.danger,
-)

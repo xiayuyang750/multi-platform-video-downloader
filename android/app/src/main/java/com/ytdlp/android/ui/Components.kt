@@ -189,45 +189,18 @@ fun formatEta(seconds: Int?): String {
 fun percentLabel(percent: Double?): String =
     if (percent == null) "" else "${(percent * 10).roundToInt() / 10.0}%"
 
-/** 标题行：标题 + 右侧留白，供各页复用。 */
-@Composable
-fun SectionRow(
-    modifier: Modifier = Modifier,
-    content: @Composable () -> Unit,
-) {
-    Row(
-        modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(Dim.gap),
-        verticalAlignment = Alignment.CenterVertically,
-    ) { content() }
-}
-
-/** 单行省略的文字。 */
-@Composable
-fun EllipsisText(
-    text: String,
-    modifier: Modifier = Modifier,
-    fontSize: androidx.compose.ui.unit.TextUnit = Font.body,
-    color: androidx.compose.ui.graphics.Color = tone.text,
-    fontWeight: FontWeight? = null,
-    maxLines: Int = 1,
-) {
-    Text(
-        text,
-        modifier = modifier,
-        fontSize = fontSize,
-        color = color,
-        fontWeight = fontWeight,
-        maxLines = maxLines,
-        overflow = TextOverflow.Ellipsis,
-        style = MaterialTheme.typography.bodyMedium,
-    )
-}
-
 /** 空的占位高度，用于列表底部避免被下载条盖住。 */
 @Composable
 fun Spacer12() = Box(Modifier.height(12.dp))
 
-/** 绝对值，用于速度显示的稳定判断（避免 ±0.1 抖动刷屏）。 */
-fun almostEqual(a: Double, b: Double, tolerance: Double = 0.5): Boolean =
-    abs(a - b) < tolerance
+/**
+ * 打开外部链接，失败时静默忽略。
+ *
+ * UriHandler.openUri 在「没有应用能处理这个链接」时会抛异常（设备上没装
+ * 浏览器、或 scheme 被系统拦截），不包一层就是直接崩。解析页和历史页都要用，
+ * 所以放在这里而不是各自的文件里。
+ */
+fun androidx.compose.ui.platform.UriHandler.openUriSafe(url: String) {
+    if (url.isBlank()) return
+    runCatching { openUri(url) }
+}
