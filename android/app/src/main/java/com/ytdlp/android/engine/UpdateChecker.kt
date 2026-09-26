@@ -18,7 +18,7 @@ object UpdateChecker {
      * 仓库地址。**要改成你自己的仓库**（owner/repo）。
      * 检查更新功能就是读这里，改完立即生效，不需要动别的代码。
      */
-    private const val OWNER = "XCM"
+    private const val OWNER = "xiayuyang750"
     private const val REPO = "multi-platform-video-downloader"
 
     private const val API = "https://api.github.com/repos/$OWNER/$REPO/releases/latest"
