@@ -53,9 +53,13 @@ class MainActivity : Activity() {
                 val ffmpeg = File(applicationInfo.nativeLibraryDir, "libffmpeg.so").absolutePath
                 val outDir = File(filesDir, "dl").absolutePath
 
-                append("【阶段1c：下载 + 合流】已单独验证通过\nffmpeg=$ffmpeg")
-                append("【阶段1d：子进程稳定性压测】各调用 30 次")
-                append(module.callAttr("subprocess_stress", ffmpeg, 30).toString())
+                append("【阶段1c/1d】已单独验证通过\nffmpeg=$ffmpeg")
+
+                // 自带的 QuickJS 同样从原生库目录调用；名字是 libqjs.so 而非 qjs，
+                // 所以必须把路径显式告诉 yt-dlp，不能靠它去 PATH 上找。
+                val qjs = File(applicationInfo.nativeLibraryDir, "libqjs.so").absolutePath
+                append("【阶段1b：YouTube + QuickJS】\n$YOUTUBE_URL\nqjs=$qjs")
+                append(module.callAttr("youtube_test", YOUTUBE_URL, ffmpeg, qjs).toString())
             } catch (exc: Exception) {
                 append("失败：${exc.javaClass.simpleName}: ${exc.message}")
             }
@@ -83,5 +87,8 @@ class MainActivity : Activity() {
 
     private companion object {
         const val TEST_URL = "https://www.bilibili.com/video/BV1ckhW6DErb/"
+
+        // YouTube 上长期稳定的公开测试片（Big Buck Bunny），用于验证 JS 运行时
+        const val YOUTUBE_URL = "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
     }
 }

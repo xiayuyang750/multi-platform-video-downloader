@@ -89,6 +89,52 @@ def download_and_merge(url: str, out_dir: str, ffmpeg_path: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+def youtube_test(url: str, ffmpeg_path: str, qjs_path: str) -> str:
+    """阶段 1b：验证自带的 QuickJS 能让 YouTube 拿到完整画质档。
+
+    没有 JS 运行时，yt-dlp 解不了 YouTube 的 n-sig / PO token 挑战，表现就是
+    画质档缺失 —— 这正是 Seal / YTDLnis 那类 App 解析失败的根因。
+
+    yt-dlp 只认四个运行时键：deno / node / bun / quickjs。
+    quickjs-ng 不是键，而是它从 `qjs --help` 里识别出来的**名字**，
+    版本判据是 > 0 即受支持（见 yt_dlp/utils/_jsruntime.py 的 QuickJsRuntime）。
+    """
+    import yt_dlp
+
+    result = {
+        "qjs": qjs_path,
+        "qjs_exists": os.path.exists(qjs_path),
+        # yt-dlp 靠这段输出来识别运行时，先自己跑一遍确认能被认出
+        "qjs_help": _run([qjs_path, "--help"], grep="QuickJS"),
+    }
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "ignoreconfig": True,
+        "js_runtimes": {"quickjs": {"path": qjs_path}},
+        "ffmpeg_location": ffmpeg_path,
+    }
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=False)
+        formats = info.get("formats") or []
+        result.update(
+            {
+                "ok": True,
+                "title": (info.get("title") or "")[:60],
+                "format_count": len(formats),
+                "heights": sorted({f.get("height") for f in formats if f.get("height")}),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        result.update({"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]})
+
+    print("[youtube] " + json.dumps(result, ensure_ascii=False))
+    return json.dumps(result, ensure_ascii=False)
+
+
 def subprocess_stress(ffmpeg_path: str, times: int = 30) -> str:
     """反复调用同一个子进程，量化安卓 fork 竞态到底有多频繁。
 
@@ -122,12 +168,16 @@ def subprocess_stress(ffmpeg_path: str, times: int = 30) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-def _run(argv: list, first_line_only: bool = False, grep_streams: bool = False) -> str:
+def _run(argv: list, first_line_only: bool = False, grep_streams: bool = False, grep: str = "") -> str:
+    """跑一条命令，按需要在输出里挑内容，避免把大段输出塞进界面。"""
     import subprocess
 
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
         text = (proc.stderr or "") + (proc.stdout or "")
+        if grep:
+            hits = [ln.strip() for ln in text.splitlines() if grep.lower() in ln.lower()]
+            return f"rc={proc.returncode} | " + " || ".join(hits)[:200]
         if first_line_only:
             lines = [ln for ln in text.splitlines() if ln.strip()]
             return f"rc={proc.returncode} | {lines[0][:80] if lines else ''}"

@@ -12,6 +12,10 @@ android/.idea/
 android/local.properties
 android/*.keystore
 
+# 安卓端中间产物：交叉编译 QuickJS 等原生依赖时的构建树
+android/.build-tmp/
+android/.kotlin/
+
 # 安卓端原生依赖：体积大，由脚本交叉编译/下载生成
 android/app/src/main/jniLibs/**/libqjs.so
 android/app/src/main/jniLibs/**/libffmpeg.so
