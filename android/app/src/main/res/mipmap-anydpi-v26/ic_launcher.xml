@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  应用图标（自适应图标，Android 8.0+）。
+
+  用纯矢量绘制，不放 PNG：minSdk 是 26，正好是自适应图标的最低版本，
+  所以一份 XML 就能覆盖全部设备，不必再为每种密度出图。
+
+  图案含义：播放三角 + 下方一条进度线 —— 一眼能看出「能看、也能下」。
+  配色取自设计令牌的 accent（#3563E9），与两端界面同源。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <!-- Android 13+ 的主题图标（跟随系统取色） -->
+    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

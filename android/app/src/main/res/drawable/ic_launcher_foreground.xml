@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  图标前景：播放三角 + 一条进度线。
+
+  自适应图标的画布是 108x108，但四周会被系统裁掉，只有中间 72x72
+  （即 18~90）是安全区，所以图案必须全部落在这个范围内。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 播放三角。圆角处理：用 strokeLineJoin=round 让尖角不刺眼 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M42,34 L42,66 L70,50 Z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round" />
+
+    <!-- 下方的进度线，呼应「下载」 -->
+    <path
+        android:pathData="M40,76 L68,76"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineCap="round" />
+</vector>

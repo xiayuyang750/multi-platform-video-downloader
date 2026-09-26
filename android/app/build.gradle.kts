@@ -1,3 +1,8 @@
+// java.util.Properties 必须 import 进来用：在 Kotlin DSL 里直接写
+// java.util.Properties 会被解析成 Gradle 的 java 扩展（JavaPluginExtension），
+// 报 "Unresolved reference 'util'"。
+import java.util.Properties
+
 plugins {
     // AGP 9.0 起内置 Kotlin 支持，不能再显式声明 org.jetbrains.kotlin.android，
     // 否则报 "The 'org.jetbrains.kotlin.android' plugin is no longer required
@@ -7,6 +12,14 @@ plugins {
     // 但 Compose 编译器插件不在 AGP 的内置范围里，必须自己应用，
     // 否则 buildFeatures.compose 一开就报错。
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// 签名信息放在 android/keystore.properties（不进版本控制）。
+// 文件不存在时留空 —— 这样别人 clone 下来仍能跑 assembleDebug，
+// 不会因为缺签名文件而连调试包都构建不了。
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
 }
 
 android {
@@ -32,9 +45,24 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            if (keystoreProps.isNotEmpty()) {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            // 拿到签名配置才挂上去，否则 release 构建会因为缺 keystore 直接失败
+            if (keystoreProps.isNotEmpty()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

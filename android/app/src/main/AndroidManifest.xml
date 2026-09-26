@@ -1,14 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!--
+      「所有文件访问权限」：yt-dlp 走普通文件 API 写文件，而 Android 11+
+      的分区存储不让应用直接用路径写公共目录。没有它就只能落到应用私有目录
+      （文件管理器看不到，用户找不到下载的文件）。
+      这是敏感权限，所以应用里做了首启引导，且未授权时会自动回退到私有目录 ——
+      不授权也能用，只是文件位置没那么好找。
+    -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
     <application
         android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.Ytdlp"
+        android:requestLegacyExternalStorage="true"
         android:usesCleartextTraffic="true">
 
         <activity

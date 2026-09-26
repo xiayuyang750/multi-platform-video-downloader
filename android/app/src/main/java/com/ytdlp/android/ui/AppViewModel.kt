@@ -1,6 +1,8 @@
 package com.ytdlp.android.ui
 
 import android.app.Application
+import android.os.Build
+import android.os.Environment
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ytdlp.android.BuildConfig
@@ -85,6 +87,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val _url = MutableStateFlow("")
     val url: StateFlow<String> = _url.asStateFlow()
 
+    private val _update = MutableStateFlow<UpdateUi>(UpdateUi.Idle)
+    val update: StateFlow<UpdateUi> = _update.asStateFlow()
+
+    private val _needStoragePermission = MutableStateFlow(false)
+
+    /** 真表示还没拿到「所有文件访问权限」，界面据此显示引导条。 */
+    val needStoragePermission: StateFlow<Boolean> = _needStoragePermission.asStateFlow()
+
+    // 注意：上面这些 StateFlow 必须声明在 init 块**之前**。
+    // Kotlin 按代码顺序初始化属性，而 init 里会调用 refreshStoragePermission()，
+    // 若把 _needStoragePermission 写在文件末尾，init 执行时它还是 null，
+    // 会抛 "Attempt to invoke ... setValue on a null object reference"。
     private var parseJob: Job? = null
 
     init {
@@ -92,6 +106,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) { Engine.warmUp(ctx) }
         refreshHistory()
         refreshSettings()
+        refreshStoragePermission()
         startPollingDownload()
     }
 
@@ -328,8 +343,27 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- 检查更新 ----
 
-    private val _update = MutableStateFlow<UpdateUi>(UpdateUi.Idle)
-    val update: StateFlow<UpdateUi> = _update.asStateFlow()
+    // ---- 存储权限 ----
+
+    /**
+     * 检查存储权限。
+     *
+     * 没有这个权限也能用（引擎会自动回退到应用私有目录），但下载的文件
+     * 用文件管理器看不到，用户找不到。所以要主动引导一次。
+     */
+    fun refreshStoragePermission() {
+        _needStoragePermission.value = !hasAllFilesAccess()
+    }
+
+    private fun hasAllFilesAccess(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Android 11+ 用「所有文件访问」这个特殊权限，不是普通的运行时权限，
+            // 只能跳系统设置页让用户手动开，所以没法用 requestPermissions 申请
+            Environment.isExternalStorageManager()
+        } else {
+            ctx.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
 
     /**
      * 检查 GitHub 上的最新版本。

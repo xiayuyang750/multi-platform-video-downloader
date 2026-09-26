@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      图标底色。取自设计令牌的 accent（浅色模式：#3563E9），
+      这样图标与界面是同一个视觉体系。
+    -->
+    <color name="ic_launcher_background">#3563E9</color>
+</resources>

@@ -11,6 +11,9 @@ android/.cxx/
 android/.idea/
 android/local.properties
 android/*.keystore
+# 签名口令，绝不能进版本控制
+android/keystore.properties
+android/release.keystore
 
 # 安卓端中间产物：交叉编译 QuickJS 等原生依赖时的构建树
 android/.build-tmp/

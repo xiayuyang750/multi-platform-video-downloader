@@ -1,5 +1,10 @@
 package com.ytdlp.android.ui
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -48,6 +53,7 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
     val url by vm.url.collectAsStateWithLifecycle()
     val parse by vm.parse.collectAsStateWithLifecycle()
     val download by vm.download.collectAsStateWithLifecycle()
+    val needStoragePerm by vm.needStoragePermission.collectAsStateWithLifecycle()
     val uriHandler = LocalUriHandler.current
     val context = LocalContext.current
 
@@ -70,6 +76,30 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
             .padding(top = Dim.gapLg, bottom = 96.dp),
         verticalArrangement = Arrangement.spacedBy(Dim.gapLg),
     ) {
+        // ---- 存储权限引导（只在未授权时出现）----
+        if (needStoragePerm) {
+            Card {
+                Text(
+                    "建议授予存储权限",
+                    fontSize = Font.cardTitle,
+                    fontWeight = FontWeight.SemiBold,
+                    color = tone.text,
+                )
+                Spacer12()
+                Hint(
+                    "授予后，下载的视频会保存到系统的「下载」目录，用文件管理器就能找到。\n" +
+                        "不授予也能正常使用 —— 但文件会存进应用私有目录，文件管理器看不到，" +
+                        "只能通过应用内分享导出。"
+                )
+                Spacer12()
+                GhostButton(
+                    text = "去授权",
+                    onClick = { openStorageSettings(context) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+
         // ---- 输入区 ----
         Column(verticalArrangement = Arrangement.spacedBy(Dim.gap)) {
             OutlinedTextField(
@@ -270,4 +300,25 @@ private fun ResultCard(
             )
         }
     }
+}
+
+/**
+ * 跳到系统的「所有文件访问权限」设置页。
+ *
+ * 这是特殊权限，不能用 requestPermissions 申请，只能让用户手动开。
+ * 部分国产 ROM 没有这个页面会抛 ActivityNotFoundException —— 那时退回
+ * 应用详情页，用户也能在那里找到权限入口。
+ */
+private fun openStorageSettings(context: Context) {
+    val pkg = Uri.parse("package:${context.packageName}")
+    val direct = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, pkg)
+    } else {
+        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg)
+    }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val fallback = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    runCatching { context.startActivity(direct) }
+        .onFailure { runCatching { context.startActivity(fallback) } }
 }
