@@ -1,6 +1,9 @@
 package com.ytdlp.android.ui
 
 import android.app.Application
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.Build
 import android.os.Environment
 import androidx.lifecycle.AndroidViewModel
@@ -11,6 +14,7 @@ import com.ytdlp.android.engine.Engine
 import com.ytdlp.android.engine.Settings
 import com.ytdlp.android.engine.UpdateChecker
 import com.ytdlp.android.engine.Video
+import com.ytdlp.android.firstUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -116,14 +120,33 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _url.value = value
     }
 
+    /**
+     * 一键粘贴：从剪贴板取文本并挑出其中的链接。
+     *
+     * 与 Windows 端行为一致。抖音/B站 的「复制链接」给的是整段分享文案
+     * （「4.69 :7pm ... https://v.douyin.com/xxx/ 复制此链接...」），
+     * 不提取的话直接去解析必然失败。
+     */
+    fun pasteFromClipboard() {
+        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        val text = cm?.primaryClip?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)?.coerceToText(ctx)?.toString().orEmpty()
+        if (text.isBlank()) return
+        _url.value = firstUrl(text) ?: text.trim()
+    }
+
     // ---- 解析 ----
 
     fun parse() {
-        val target = _url.value.trim()
-        if (target.isEmpty()) {
+        val raw = _url.value.trim()
+        if (raw.isEmpty()) {
             _parse.value = ParseUi.Failed("请先粘贴视频链接")
             return
         }
+        // 支持粘贴整段分享文案：先从里面挑出链接。用户很可能直接复制抖音
+        // 的分享文本，里面混着标题和引导语，不提取就会被当成非法 URL。
+        val target = firstUrl(raw) ?: raw
+        if (target != raw) _url.value = target
         if (parseJob?.isActive == true) return
 
         _parse.value = ParseUi.Loading
@@ -206,6 +229,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun startDownload() {
         val video = (_parse.value as? ParseUi.Done)?.video ?: return
+        startDownload(video)
+    }
+
+    /** 从历史页也能直接发起下载，所以按 Video 重载一份。 */
+    fun startDownload(video: Video) {
         viewModelScope.launch {
             val error = withContext(Dispatchers.IO) {
                 runCatching { Engine.startDownload(ctx, video.sourceUrl) }
@@ -276,6 +304,38 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             refreshHistory()
         }
+    }
+
+    /**
+     * 复制到剪贴板。历史页和结果卡片都要用。
+     *
+     * 手机上「复制链接」是很常用的动作 —— 想把链接发给别人、或换台设备再解析。
+     */
+    fun copyText(text: String) {
+        if (text.isBlank()) return
+        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        cm?.setPrimaryClip(ClipData.newPlainText("链接", text))
+    }
+
+    /**
+     * 重新解析一条历史记录 —— 直链是带时效的，过一段时间就播不了/下不动，
+     * 需要重新取一次地址。对应 Windows 端的 reanalyze。
+     *
+     * 之所以切到解析页而不是原地刷新：解析结果和失败原因都需要完整展示，
+     * 历史页那一行放不下这些信息。
+     */
+    fun reanalyze(video: Video) {
+        _url.value = video.sourceUrl
+        _openParse.value = true
+        parse()
+    }
+
+    // 界面消费完就清掉，避免转屏后又自动跳一次
+    private val _openParse = MutableStateFlow(false)
+    val openParse: StateFlow<Boolean> = _openParse.asStateFlow()
+
+    fun consumeOpenParse() {
+        _openParse.value = false
     }
 
     fun clearHistory(platform: String?) {

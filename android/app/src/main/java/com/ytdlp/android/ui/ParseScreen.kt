@@ -102,33 +102,45 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
 
         // ---- 输入区 ----
         Column(verticalArrangement = Arrangement.spacedBy(Dim.gap)) {
-            OutlinedTextField(
-                value = url,
-                onValueChange = vm::onUrlChange,
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("粘贴视频链接…", fontSize = Font.body) },
-                singleLine = true,
-                shape = RoundedCornerShape(Dim.radiusSm),
-                trailingIcon = {
-                    if (url.isNotEmpty()) {
-                        IconButton(onClick = { vm.onUrlChange("") }) {
-                            Icon(Icons.Default.Close, contentDescription = "清空", tint = tone.textMuted)
+            // 输入框 + 一键粘贴，对应 Windows 端的 .input-row。
+            // 手机上长按输入框才能粘贴，多一步操作；给个显式按钮更顺手。
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(Dim.gap),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = vm::onUrlChange,
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("粘贴视频链接…", fontSize = Font.body) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(Dim.radiusSm),
+                    trailingIcon = {
+                        if (url.isNotEmpty()) {
+                            IconButton(onClick = { vm.onUrlChange("") }) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "清空",
+                                    tint = tone.textMuted,
+                                )
+                            }
                         }
-                    }
-                },
-                // 键盘上直接把「回车」变成「解析」，少一次点击
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                keyboardActions = KeyboardActions(onGo = { vm.parse() }),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = tone.accent,
-                    unfocusedBorderColor = tone.border,
-                    focusedContainerColor = tone.surface,
-                    unfocusedContainerColor = tone.surface,
-                    focusedTextColor = tone.text,
-                    unfocusedTextColor = tone.text,
-                    cursorColor = tone.accent,
-                ),
-            )
+                    },
+                    // 键盘上直接把「回车」变成「解析」，少一次点击
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                    keyboardActions = KeyboardActions(onGo = { vm.parse() }),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = tone.accent,
+                        unfocusedBorderColor = tone.border,
+                        focusedContainerColor = tone.surface,
+                        unfocusedContainerColor = tone.surface,
+                        focusedTextColor = tone.text,
+                        unfocusedTextColor = tone.text,
+                        cursorColor = tone.accent,
+                    ),
+                )
+                GhostButton(text = "粘贴", onClick = vm::pasteFromClipboard)
+            }
 
             Row(horizontalArrangement = Arrangement.spacedBy(Dim.gap)) {
                 PrimaryButton(
@@ -146,7 +158,10 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 }
             }
 
-            Hint("支持 YouTube / B站 / 抖音 / TikTok / X / Instagram。境外站点需要开着 VPN。")
+            Hint(
+                "支持直接粘贴整段分享文案，会自动提取其中的链接。\n" +
+                    "支持 YouTube / B站 / 抖音 / TikTok / X / Instagram，境外站点需要开着 VPN。"
+            )
         }
 
         // ---- 结果区 ----
@@ -217,6 +232,7 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 video = state.video,
                 download = download,
                 onDownload = vm::startDownload,
+                onCopy = { vm.copyText(state.video.sourceUrl) },
                 onOpenSource = { uriHandler.openUriSafe(state.video.sourceUrl) },
             )
         }
@@ -228,6 +244,7 @@ private fun ResultCard(
     video: com.ytdlp.android.engine.Video,
     download: com.ytdlp.android.engine.Download,
     onDownload: () -> Unit,
+    onCopy: () -> Unit,
     onOpenSource: () -> Unit,
 ) {
     Card {
@@ -294,11 +311,20 @@ private fun ResultCard(
                 modifier = Modifier.weight(1f),
             )
             GhostButton(
-                text = "打开原视频",
-                onClick = onOpenSource,
+                text = "复制链接",
+                onClick = onCopy,
                 modifier = Modifier.weight(1f),
             )
         }
+
+        Spacer(Modifier.height(Dim.gap))
+
+        // 打开原视频单独占一行：三个按钮并排时中文会被挤到换行
+        GhostButton(
+            text = "打开原视频",
+            onClick = onOpenSource,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 

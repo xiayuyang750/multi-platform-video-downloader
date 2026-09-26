@@ -33,6 +33,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -69,6 +70,15 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 fun MainScreen(vm: AppViewModel) {
     var tab by rememberSaveable { mutableStateOf(Tab.Parse) }
     val download by vm.download.collectAsStateWithLifecycle()
+
+    // 历史页点「重新解析」时，需要把用户带到解析页看结果
+    val openParse by vm.openParse.collectAsStateWithLifecycle()
+    LaunchedEffect(openParse) {
+        if (openParse) {
+            tab = Tab.Parse
+            vm.consumeOpenParse()
+        }
+    }
 
     // 存储权限是跳到系统设置页手动开的，用户回来后必须重新检查一次，
     // 否则引导条会一直挂在那里（哪怕已经授权了）。

@@ -18,7 +18,9 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -143,6 +145,9 @@ fun HistoryScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                         onToggle = {
                             expandedId = if (expandedId == video.id) null else video.id
                         },
+                        onCopy = { vm.copyText(video.sourceUrl) },
+                        onReanalyze = { vm.reanalyze(video) },
+                        onDownload = { vm.startDownload(video) },
                         onOpenSource = { uriHandler.openUriSafe(video.sourceUrl) },
                         onDelete = { vm.deleteHistory(video) },
                     )
@@ -203,12 +208,15 @@ private fun FilterChip(label: String, count: Int, active: Boolean, onClick: () -
     }
 }
 
-/** 一条历史记录：折叠时只有一行，点开后向下展开播放区。 */
+/** 一条历史记录：折叠态就给出常用操作，点开后向下展开播放区。 */
 @Composable
 private fun HistoryItem(
     video: Video,
     expanded: Boolean,
     onToggle: () -> Unit,
+    onCopy: () -> Unit,
+    onReanalyze: () -> Unit,
+    onDownload: () -> Unit,
     onOpenSource: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -223,9 +231,9 @@ private fun HistoryItem(
             Modifier
                 .fillMaxWidth()
                 .clickable(onClick = onToggle)
-                .padding(start = Dim.cardPadding, end = 4.dp, top = 12.dp, bottom = 12.dp),
+                .padding(start = Dim.cardPadding, end = 2.dp, top = 10.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(Dim.gap),
+            horizontalArrangement = Arrangement.spacedBy(Dim.gapSm),
         ) {
             PlatformBadge(video.platform)
 
@@ -255,12 +263,30 @@ private fun HistoryItem(
                 )
             }
 
-            IconButton(onClick = onDelete, modifier = Modifier.size(Dim.touchTarget)) {
+            // 折叠态就给出操作，不必展开 —— 与 Windows 端一致。
+            // 播放和下载放在展开态：手机屏窄，五个图标排一排容易误触。
+            IconButton(onClick = onCopy, modifier = Modifier.size(40.dp)) {
+                Icon(
+                    Icons.Default.ContentCopy,
+                    contentDescription = "复制链接",
+                    tint = tone.textMuted,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            IconButton(onClick = onReanalyze, modifier = Modifier.size(40.dp)) {
+                Icon(
+                    Icons.Default.Refresh,
+                    contentDescription = "重新解析",
+                    tint = tone.textMuted,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            IconButton(onClick = onDelete, modifier = Modifier.size(40.dp)) {
                 Icon(
                     Icons.Default.Delete,
                     contentDescription = "删除这条记录",
                     tint = tone.textMuted,
-                    modifier = Modifier.size(20.dp),
+                    modifier = Modifier.size(18.dp),
                 )
             }
         }
@@ -269,7 +295,11 @@ private fun HistoryItem(
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .padding(start = Dim.cardPadding, end = Dim.cardPadding, bottom = Dim.cardPadding),
+                    .padding(
+                        start = Dim.cardPadding,
+                        end = Dim.cardPadding,
+                        bottom = Dim.cardPadding,
+                    ),
                 verticalArrangement = Arrangement.spacedBy(Dim.gap),
             ) {
                 PlayerBox(video)
@@ -279,11 +309,18 @@ private fun HistoryItem(
                             "没有可直连播放的地址。下载后这里就能直接播放本地文件。"
                     )
                 }
-                GhostButton(
-                    text = "打开原视频",
-                    onClick = onOpenSource,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                Row(horizontalArrangement = Arrangement.spacedBy(Dim.gap)) {
+                    PrimaryButton(
+                        text = "下载",
+                        onClick = onDownload,
+                        modifier = Modifier.weight(1f),
+                    )
+                    GhostButton(
+                        text = "打开原视频",
+                        onClick = onOpenSource,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
         }
     }

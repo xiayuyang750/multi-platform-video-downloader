@@ -115,9 +115,12 @@ dependencies {
     // 进行中的状态丢掉；collectAsStateWithLifecycle 则保证界面不可见时停订阅
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
-    // 底部导航要的三个图标（解析/历史/设置）在 core 里就有，
-    // 不必引入 extended 那个几 MB 的大包
+    // 底部导航要的三个图标（解析/历史/设置）在 core 里就有。
+    // extended 是为了历史项那几个操作图标（复制链接 / 重新解析 / 播放 / 下载）——
+    // core 里没有「复制」这类图标，用近似的 Share 会让人误以为是分享，
+    // 图标语义错了比多占几 MB 更糟。
     implementation("androidx.compose.material:material-icons-core")
+    implementation("androidx.compose.material:material-icons-extended")
 
     // 播放器。用 Media3 的 ExoPlayer：它是系统级组件，硬解、音轨切换、
     // 各种容器格式都由系统兜底，比自己写 MediaPlayer 省心。
