@@ -1,5 +1,6 @@
 package com.ytdlp.android.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -18,9 +19,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -28,25 +31,38 @@ import androidx.compose.ui.unit.sp
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-/** 平台图标：圆角方块 + 首字，对应网页端的 .pf-icon。
+/** 平台图标：彩色圆角方块 + 白色品牌矢量，对应网页端的 .pf-icon。
  *
- * 网页端刻意不用外部图片资源（避免加载失败/版权问题），安卓端沿用同一做法。 */
+ * 网页端并不是「用首字当图标」—— 它内联了 simple-icons 的官方品牌 SVG，
+ * 只是安卓端之前偷懒画了个首字。现在两边用同一份路径（见 BrandIcons.kt）。
+ * 没有收录品牌路径的平台（目前只有「其他」）才退回原来的首字方案。 */
 @Composable
 fun PlatformBadge(platform: String, size: Int = 18) {
+    // 解析 pathData 有开销，按平台缓存；列表滚动时不该每条都重解析一遍
+    val vector = remember(platform) { brandVector(platform) }
     Box(
         Modifier
             .size(size.dp)
-            .clip(RoundedCornerShape(5.dp))
+            .clip(RoundedCornerShape((size * 0.28f).dp))
             .background(PlatformColor.of(platform)),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            PlatformColor.initial(platform),
-            color = androidx.compose.ui.graphics.Color.White,
-            fontSize = (size * 0.6f).sp,
-            fontWeight = FontWeight.Bold,
-            lineHeight = (size * 0.6f).sp,
-        )
+        if (vector != null) {
+            // 网页端 18px 的底色方块里放 13px 的图标，这里按同样的比例缩放
+            Image(
+                imageVector = vector,
+                contentDescription = null,
+                modifier = Modifier.size((size * 0.72f).dp),
+            )
+        } else {
+            Text(
+                PlatformColor.initial(platform),
+                color = Color.White,
+                fontSize = (size * 0.6f).sp,
+                fontWeight = FontWeight.Bold,
+                lineHeight = (size * 0.6f).sp,
+            )
+        }
     }
 }
 
@@ -143,19 +159,19 @@ fun formatDuration(seconds: Int?): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }
 
-/** 相对时间。历史列表里用，超过一周就直接显示日期。 */
-fun formatRelativeTime(unixSeconds: Long): String {
+/**
+ * 绝对时间，格式和 Windows 端 app.js 的 formatTime 逐字一致：`2026-10-01 09:31`。
+ *
+ * 历史页原来用的是相对时间（「刚刚」「3 天前」），实机看下来有两个问题：
+ *   1. 用户想知道的是「我什么时候解析的」，相对时间给不出具体时刻；
+ *   2. 它和同一行的视频时长（`17:26` 这种）混在一起、又没有标签，
+ *      看起来就像两个互相矛盾的时间，实测被当成 bug 报了上来。
+ * 两端显示同一件事就该用同一种格式，所以这里直接对齐 Windows。
+ */
+fun formatDateTime(unixSeconds: Long): String {
     if (unixSeconds <= 0) return ""
-    val diff = System.currentTimeMillis() / 1000 - unixSeconds
-    return when {
-        diff < 60 -> "刚刚"
-        diff < 3600 -> "${diff / 60} 分钟前"
-        diff < 86400 -> "${diff / 3600} 小时前"
-        diff < 86400 * 2 -> "昨天"
-        diff < 86400 * 7 -> "${diff / 86400} 天前"
-        else -> java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
-            .format(java.util.Date(unixSeconds * 1000))
-    }
+    return java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+        .format(java.util.Date(unixSeconds * 1000))
 }
 
 /** 字节数格式化（下载进度用）。 */

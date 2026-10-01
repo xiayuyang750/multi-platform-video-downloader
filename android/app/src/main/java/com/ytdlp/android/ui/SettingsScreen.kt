@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ytdlp.android.BuildConfig
+import com.ytdlp.android.FeedbackActivity
 import com.ytdlp.android.ProbeActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -156,13 +157,28 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
             }
         }
 
-        // ---- 诊断 ----
+        // ---- 反馈与诊断 ----
         Card {
             FieldLabel("遇到问题？")
             Spacer12()
             Hint(
-                "如果某个链接解析不了、或下载报错，可以打开自检页跑一遍。" +
-                    "它会如实列出引擎状态和原始报错，便于定位问题。"
+                "解析不了、下载报错、界面不对劲，都可以直接反馈给我。" +
+                    "平台和链接写清楚的话，我复现会快很多。"
+            )
+            Spacer12()
+            PrimaryButton(
+                text = "意见反馈",
+                onClick = {
+                    runCatching {
+                        context.startActivity(Intent(context, FeedbackActivity::class.java))
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer12()
+            Hint(
+                "想自己先排查的话，可以打开自检页跑一遍 —— " +
+                    "它会如实列出引擎状态和原始报错。"
             )
             Spacer12()
             GhostButton(
@@ -254,7 +270,7 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
             Hint(
                 "解析与下载由 yt-dlp 完成，音视频合流用内置的 ffmpeg，" +
                     "YouTube 的画质解锁靠内置的 JS 运行时。\n" +
-                    "反馈：${FEEDBACK_MAIL}"
+                    "反馈渠道打不开时，也可以直接发邮件到 ${FEEDBACK_MAIL}。"
             )
         }
     }

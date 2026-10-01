@@ -64,6 +64,15 @@
             android:exported="false"
             android:label="浏览器模式解析"
             android:theme="@style/Theme.Ytdlp" />
+
+        <!-- 意见反馈页：从设置页进入，填完直接发到开发者的企业微信群。
+             windowSoftInputMode 用 adjustResize，否则展开键盘会盖住输入框。 -->
+        <activity
+            android:name=".FeedbackActivity"
+            android:exported="false"
+            android:label="意见反馈"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Ytdlp" />
     </application>
 
 </manifest>

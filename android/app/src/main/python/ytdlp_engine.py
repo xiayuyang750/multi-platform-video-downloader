@@ -201,6 +201,13 @@ ERROR_HINTS = [
         "网络超时。境外站点（YouTube / Instagram / X）需要开着 VPN 才能访问。",
     ),
     (
+        # 实测在没开代理时解析 Instagram 会抛这个，比 timed out 更常见
+        "Network is unreachable",
+        "连不上网络。请检查：\n"
+        "① 境外站点（YouTube / Instagram / X / TikTok）需要开着 VPN；\n"
+        "② 国内站点（抖音 / B站）则相反，开着代理走境外节点反而会被拦，请关掉代理。",
+    ),
+    (
         "Unsupported URL",
         "不支持这种链接。",
     ),
@@ -248,21 +255,74 @@ def _brief(text: str, limit: int = 200) -> str:
     return one_line[:limit] + "…" if len(one_line) > limit else one_line
 
 
-def friendly_error(raw: str) -> str:
+# ==================== 按平台细化的错误提示 ====================
+# 同一个错误码在不同平台上成因往往完全不同，只给通用说明等于没说：
+#   HTTP 403 → 抖音是「境外 IP 被拦」，X 是「没带 Cookie」，TikTok 是「地区限制」
+# 所以这里按平台 + 错误特征做二级匹配，命中的话优先于上面的通用表。
+
+PLATFORM_ERROR_HINTS = {
+    "抖音": {
+        "403": "抖音拒绝了这次请求。最常见的原因是网络出口不对 —— "
+               "抖音是国内平台，开着代理/VPN 走境外节点反而会被拦，请先关掉代理再试。",
+        "Fresh cookies": "抖音需要登录态。若开着代理请先关掉，抖音对境外 IP 限制较严。",
+    },
+    "X": {
+        "403": "X 对未登录访问限制很严，需要导入 Cookie（「设置 → Cookie 文件」）。"
+               "导出前请确保浏览器里处于登录状态。",
+        "No video could be found": "这条推文里没有视频（可能只有文字或图片）。"
+                                   "如果你确认它有视频，那多半是 Cookie 过期了 —— 重新导出一次即可。",
+        "429": "请求过于频繁，等几分钟再试。",
+        "timed out": "连不上 X。境外站点需要代理，请检查网络。",
+    },
+    "Instagram": {
+        "empty media response": "Instagram 需要登录。请到「设置」导入 Cookie"
+                                "（导出前确保浏览器里已登录 Instagram）。",
+        "login required": "Instagram 需要登录，请到「设置」导入 Cookie。",
+        "429": "Instagram 限流了，等几分钟再试。",
+        "timed out": "连不上 Instagram。境外站点需要代理，请检查网络。",
+    },
+    "TikTok": {
+        "Unexpected response": "TikTok 拒绝了这次请求。常见原因："
+                               "① 视频有地区限制，需要对应地区的网络节点；"
+                               "② 需要登录态，可导入 Cookie 后重试。",
+        "403": "TikTok 对部分地区限制访问，换一个网络节点试试。",
+        "timed out": "连不上 TikTok。境外站点需要代理，请检查网络。",
+    },
+    "YouTube": {
+        "Sign in to confirm": "YouTube 要求登录确认年龄。可以导入 Cookie，"
+                              "但注意：实测给 YouTube 带 Cookie 会把画质从 1080p 降到 360p。",
+        "Unable to extract": "YouTube 改版了，当前内置的解析引擎跟不上，需要等应用更新。",
+        "timed out": "连不上 YouTube。境外站点需要代理，请检查网络。",
+    },
+    "B站": {
+        "403": "B站拒绝了这次请求。可能是该视频需要大会员，或触发了风控，稍后再试。",
+        "404": "视频不存在或已被删除。",
+        "timed out": "连不上 B站，请检查网络。",
+    },
+}
+
+
+def friendly_error(raw: str, platform: str = "") -> str:
     """把英文报错翻译成中文说明。
 
-    两条原则：
-      1. 已知原因 → 给出「说人话的原因 + 该怎么办」；
-      2. 未知原因 → 也要给一句中文兜底，而不是把 yt-dlp 的英文原样丢给用户。
-         实测遇到的绝大多数失败都落在三种情况里（要登录 / 地区限制或已删除 /
-         站点改版），把它们列出来，用户至少知道该往哪个方向试。
+    匹配顺序（越具体越优先）：
+      1. 平台 + 错误特征 —— 同一个 403 在不同平台成因完全不同，这个最有用；
+      2. 通用错误特征；
+      3. 都不匹配就给中文兜底，列出三种常见情况，至少让用户知道往哪试。
     """
     text = (raw or "").strip()
     if not text:
         return "解析失败，但没有拿到具体原因。可以打开「引擎自检页」看看细节。"
+
+    if platform:
+        for needle, hint in (PLATFORM_ERROR_HINTS.get(platform) or {}).items():
+            if needle.lower() in text.lower():
+                return f"{hint}\n\n原始报错：{_brief(text)}"
+
     for needle, hint in ERROR_HINTS:
         if needle.lower() in text.lower():
             return f"{hint}\n\n原始报错：{_brief(text)}"
+
     return (
         "解析失败。常见原因有以下几种：\n"
         "① 该视频需要登录（可到「设置」导入 Cookie）；\n"
@@ -680,7 +740,7 @@ class Engine:
                 return self._parse_x(url, raw)
             return {
                 "ok": False,
-                "error": friendly_error(raw) + self._cookie_hint(url, raw),
+                "error": friendly_error(raw, platform) + self._cookie_hint(url, raw),
             }
 
         if not info:
@@ -726,7 +786,7 @@ class Engine:
             "error": (
                 "抖音解析失败，已自动改用浏览器模式重试。\n"
                 f"接口方式失败原因：{api_err}\n"
-                f"（yt-dlp 的错误：{friendly_error(ytdlp_err)}）"
+                f"（yt-dlp 的错误：{friendly_error(ytdlp_err, '抖音')}）"
             ),
         }
 
@@ -839,7 +899,7 @@ class Engine:
             return {
                 "ok": False,
                 "error": (f"X 备用解析失败：{exc}\n"
-                          f"（主方案 yt-dlp 的错误：{friendly_error(ytdlp_err)}）"
+                          f"（主方案 yt-dlp 的错误：{friendly_error(ytdlp_err, 'X')}）"
                           # 这里必须补上 Cookie 提示：X 一旦 yt-dlp 失败就必进备用链路，
                           # 而上面那句翻译会把「缺 Cookie」说成「这条推文里没有视频」，
                           # 用户会照着错的方向去查。注意 windows/engine.py 目前没补，
