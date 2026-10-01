@@ -34,8 +34,9 @@ android {
         applicationId = "com.ytdlp.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        // 1.0.1：抖音改为直接调公开接口（修复装完解析不了抖音的问题）
+        versionCode = 2
+        versionName = "1.0.1"
 
         ndk {
             // Chaquopy 的 Python 解释器是原生组件，必须显式声明 ABI。
