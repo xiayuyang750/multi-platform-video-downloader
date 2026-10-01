@@ -99,6 +99,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** 真表示还没拿到「所有文件访问权限」，界面据此显示引导条。 */
     val needStoragePermission: StateFlow<Boolean> = _needStoragePermission.asStateFlow()
 
+    /** 外观模式。初值直接读持久化，所以重建界面时不会先闪一下默认色再跳成用户的偏好。 */
+    private val _themeMode = MutableStateFlow(ThemePrefs.load(ctx))
+    val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
+
     // 注意：上面这些 StateFlow 必须声明在 init 块**之前**。
     // Kotlin 按代码顺序初始化属性，而 init 里会调用 refreshStoragePermission()，
     // 若把 _needStoragePermission 写在文件末尾，init 执行时它还是 null，
@@ -401,6 +405,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _settings.value = _settings.value.copy(notice = null)
     }
 
+    // ---- 外观 ----
+
+    /**
+     * 切换外观模式。改完立刻落盘 —— 这里没有「保存」按钮，点了就该生效并记住。
+     * 不落盘的话，用户下次冷启动会被打回跟随系统，看起来就像设置没生效。
+     */
+    fun setThemeMode(mode: ThemeMode) {
+        if (_themeMode.value == mode) return
+        _themeMode.value = mode
+        ThemePrefs.save(ctx, mode)
+    }
+
     // ---- 检查更新 ----
 
     // ---- 存储权限 ----
@@ -412,7 +428,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * 用文件管理器看不到，用户找不到。所以要主动引导一次。
      */
     fun refreshStoragePermission() {
-        _needStoragePermission.value = !hasAllFilesAccess()
+        val missing = !hasAllFilesAccess()
+        val changed = missing != _needStoragePermission.value
+        _needStoragePermission.value = missing
+        // 权限状态变了 = 输出目录很可能也跟着变了（刚授权就该从私有目录切回
+        // 系统「下载」目录）。引擎那边每次读设置都会重新探测，所以这里只要重读一次。
+        // 只在真的变了时才读，否则每次切回前台都要白跑一趟引擎。
+        if (changed) refreshSettings()
     }
 
     private fun hasAllFilesAccess(): Boolean =

@@ -1,5 +1,6 @@
 package com.ytdlp.android.ui
 
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -23,7 +24,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
@@ -105,19 +111,19 @@ fun HistoryScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 horizontalArrangement = Arrangement.spacedBy(Dim.gapSm),
             ) {
                 item {
-                    FilterChip(
+                    SelectChip(
                         label = "全部",
-                        count = history.items.size,
-                        active = history.platform == null,
+                        badge = history.items.size,
+                        selected = history.platform == null,
                         onClick = { vm.selectPlatform(null) },
                     )
                 }
                 // 按平台名排序，保证每次进来的顺序稳定
                 items(history.counts.keys.sorted()) { platform ->
-                    FilterChip(
+                    SelectChip(
                         label = platform,
-                        count = history.counts[platform] ?: 0,
-                        active = history.platform == platform,
+                        badge = history.counts[platform] ?: 0,
+                        selected = history.platform == platform,
                         onClick = { vm.selectPlatform(platform) },
                     )
                 }
@@ -134,11 +140,13 @@ fun HistoryScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    if (history.items.isEmpty()) "还没有解析过视频"
-                    else "这个平台下没有记录",
-                    fontSize = Font.meta,
-                    color = tone.textMuted,
+                EmptyState(
+                    // 两种空态要分开说：一个是「从来没用过」，一个是「这个筛选下没有」。
+                    // 后者还提示用户下一步往哪走，否则会以为记录丢了。
+                    icon = if (history.items.isEmpty()) Icons.Default.Search else Icons.Default.List,
+                    title = if (history.items.isEmpty()) "还没有解析过视频" else "这个平台下没有记录",
+                    hint = if (history.items.isEmpty()) "去解析页粘贴一个链接试试"
+                    else "换个平台标签看看",
                 )
             }
 
@@ -202,30 +210,34 @@ fun HistoryScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
     }
 }
 
-/** 筛选标签，对应网页端的 .tab（带数量徽章）。 */
+/**
+ * 空态。原来是一行灰色小字居中，看着像「加载失败」而不是「还没东西」。
+ *
+ * 换成品牌渐变方块 + 图标 + 主副文案：一是填满整屏的空白，二是让品牌色
+ * 在这里出现一次 —— 空列表是用户最容易盯着看几秒的界面。
+ */
 @Composable
-private fun FilterChip(label: String, count: Int, active: Boolean, onClick: () -> Unit) {
-    Row(
-        Modifier
-            .clip(RoundedCornerShape(999.dp))
-            .background(if (active) tone.accentSoft else tone.surface)
-            .border(1.dp, if (active) tone.accent else tone.border, RoundedCornerShape(999.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+private fun EmptyState(icon: ImageVector, title: String, hint: String) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(Dim.gap),
     ) {
-        Text(
-            label,
-            fontSize = Font.meta,
-            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-            color = if (active) tone.accent else tone.textMuted,
-        )
-        Text(
-            count.toString(),
-            fontSize = Font.tabBadge,
-            color = if (active) tone.accent else tone.textMuted,
-        )
+        Box(
+            Modifier
+                .size(64.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(brandBrush),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(30.dp),
+            )
+        }
+        Text(title, fontSize = Font.body, fontWeight = FontWeight.Medium, color = tone.text)
+        Text(hint, fontSize = Font.hint, color = tone.textMuted)
     }
 }
 
@@ -249,6 +261,10 @@ private fun HistoryItem(
     Column(
         Modifier
             .fillMaxWidth()
+            // 展开/收起平滑过渡。原来是瞬变：点一下，底下「唰」地多出半屏内容，
+            // 用户根本来不及看清是新展开了什么。配合外层的 clip，长出来的过程
+            // 是被卡片边框裁着的，不会溢出到相邻条目上。
+            .animateContentSize()
             .clip(RoundedCornerShape(Dim.radius))
             .background(tone.surface)
             .border(1.dp, tone.border, RoundedCornerShape(Dim.radius))
@@ -289,8 +305,8 @@ private fun HistoryItem(
                     DetailLine("账号 ID", video.uploaderId)
                     DetailLine("时长", formatDuration(video.duration))
                     // 原始解析链接：之前界面上完全没有，用户想核对「当初贴的是哪个链接」
-                    // 时无从下手。长链接会自动换行，不会撑破布局。
-                    DetailLine("原始链接", video.sourceUrl)
+                    // 时无从下手。链接实测能铺到 14 行，所以默认折成 2 行、点击展开。
+                    DetailLine("原始链接", video.sourceUrl, collapsible = true)
                     if (video.hasLocalFile) DetailLine("本地文件", "已下载")
                 }
 
@@ -398,11 +414,28 @@ private fun CompactRow(
 /** 展开态里的一行「标签 值」。标签定宽，值换行 —— 长链接不会把布局撑破。
  *
  * 行高压到 15sp（字号 12.5sp 的 1.2 倍）：默认行距会把每行撑到近 18sp，
- * 五六行加起来就是几十像素的「空档」，观感上像是有意留的白。 */
+ * 五六行加起来就是几十像素的「空档」，观感上像是有意留的白。
+ *
+ * @param collapsible 默认只显示 2 行、点一下展开，末尾跟一个箭头图标。
+ *   只有「原始链接」需要它：B站那种分享链接带一堆跟踪参数（buvid / spmid /
+ *   share_session_id…），完整铺出来实测有 14 行、742px，占掉四分之一屏。
+ *   值本身很短的行不该跟着变成可点的 —— 点一下什么都没发生比不可点更让人困惑，
+ *   所以做成显式开关而不是按长度猜。
+ *
+ *   箭头是必须的：一开始只靠文本末尾的「…」，实测确实没人意识到这里能点开 ——
+ *   省略号只说明「被截断了」，不等于「可展开」。
+ */
 @Composable
-private fun DetailLine(label: String, value: String) {
+private fun DetailLine(label: String, value: String, collapsible: Boolean = false) {
     if (value.isBlank()) return
-    Row(horizontalArrangement = Arrangement.spacedBy(Dim.gapSm)) {
+    // 用 value 做 key：换一条记录展开时，折叠状态要跟着重置
+    var expanded by rememberSaveable(value) { mutableStateOf(false) }
+    Row(
+        Modifier.then(if (collapsible) Modifier.clickable { expanded = !expanded } else Modifier),
+        horizontalArrangement = Arrangement.spacedBy(Dim.gapSm),
+        // 展开后内容有很多行，箭头贴顶才不会悬在整段文字的中间
+        verticalAlignment = if (expanded) Alignment.Top else Alignment.CenterVertically,
+    ) {
         Text(
             label,
             fontSize = Font.hint,
@@ -415,7 +448,17 @@ private fun DetailLine(label: String, value: String) {
             fontSize = Font.hint,
             lineHeight = 15.sp,
             color = tone.text,
+            maxLines = if (collapsible && !expanded) 2 else Int.MAX_VALUE,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
+        if (collapsible) {
+            Icon(
+                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                contentDescription = if (expanded) "收起完整链接" else "展开完整链接",
+                tint = tone.textMuted,
+                modifier = Modifier.size(16.dp),
+            )
+        }
     }
 }

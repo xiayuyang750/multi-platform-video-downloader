@@ -1,9 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  图标前景：播放三角 + 一条进度线。
+  图标前景层：白色圆角方块，中间镂空一个播放三角。
 
-  自适应图标的画布是 108x108，但四周会被系统裁掉，只有中间 72x72
-  （即 18~90）是安全区，所以图案必须全部落在这个范围内。
+  图案含义：外框是「视频帧」，里面是播放键 —— 一个形状同时说清「能看」和「是视频」，
+  不靠细节堆叠，缩到桌面上的 48px 也不会糊。
+
+  安全区：自适应图标的画布是 108x108，但四周会被系统按不同形状（圆/方/水滴）裁掉，
+  只有中间 72x72（即 18~90）是保证可见的。所以图形铺满 18~90，而不是整个画布。
+
+  镂空靠 fillType="evenOdd"：外圈圆角矩形和内层三角写在同一个 path 里，
+  偶数次覆盖的区域被挖空，三角那段就变成了洞，透出底下的渐变。
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
@@ -11,19 +17,8 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- 播放三角。圆角处理：用 strokeLineJoin=round 让尖角不刺眼 -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M42,34 L42,66 L70,50 Z"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="6"
-        android:strokeLineJoin="round"
-        android:strokeLineCap="round" />
-
-    <!-- 下方的进度线，呼应「下载」 -->
-    <path
-        android:pathData="M40,76 L68,76"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="6"
-        android:strokeLineCap="round" />
+        android:fillType="evenOdd"
+        android:pathData="M36,18h36a18,18 0 0 1 18,18v36a18,18 0 0 1 -18,18H36a18,18 0 0 1 -18,-18V36a18,18 0 0 1 18,-18ZM44,39L70,54L44,69Z" />
 </vector>

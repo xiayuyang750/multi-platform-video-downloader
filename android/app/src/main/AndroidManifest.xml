@@ -50,11 +50,19 @@
         </activity>
 
         <!-- 引擎自检页：不是给用户用的，而是排查引擎问题时的诊断入口。
-             不设 intent-filter，所以桌面看不到图标，只能用
-             adb shell am start -n com.ytdlp.android/.ProbeActivity 启动。 -->
+             v1.0.3 把设置页里那个入口删掉了 —— 它一进去就自动跑三条网络解析，
+             用户看到一屏原始 JSON 只会以为应用卡死或偷跑流量。
+
+             这里刻意设为 exported="true"：不导出的话 adb 根本起不来。
+             原先这段注释写着「只能用 adb 启动」，但 exported="false" 且没有
+             intent-filter，实际两条路都走不通 —— 实测 adb 会被
+             SecurityException（Permission Denial: not exported）拒掉，
+             那句注释一直没人验证过。
+             没有 intent-filter，桌面不会出现图标；被别的应用按组件名拉起也只能
+             看到日志，按钮还得用户自己点，不构成实际风险。 -->
         <activity
             android:name=".ProbeActivity"
-            android:exported="false"
+            android:exported="true"
             android:label="引擎自检" />
 
         <!-- 抖音的浏览器模式解析页：单独开一个 Activity 是因为 WebView 需要

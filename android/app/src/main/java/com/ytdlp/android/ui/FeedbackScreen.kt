@@ -122,9 +122,9 @@ fun FeedbackScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 return@Column
             }
 
-            // ---- 问题描述（必填）----
+            // ---- 问题或建议（必填）----
             Card {
-                FieldLabel("问题描述")
+                FieldLabel("问题或建议")
                 Spacer12()
                 OutlinedTextField(
                     value = message,
@@ -136,8 +136,8 @@ fun FeedbackScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                     modifier = Modifier.fillMaxWidth().height(160.dp),
                     placeholder = {
                         Text(
-                            "哪个平台、哪个链接、报了什么错？\n" +
-                                "比如：抖音的视频点解析提示「解析失败」，链接是 https://…",
+                            "报错的话：哪个平台、哪个链接、报了什么错？\n" +
+                                "有想法的话：想加什么功能、哪里不好用，也直接说。",
                             fontSize = Font.body,
                         )
                     },
@@ -302,10 +302,7 @@ fun FeedbackScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 }
             }
 
-            Hint(
-                "反馈会直接发给开发者。问题描述以外都不填也能提交，" +
-                    "但写清楚平台和链接能让我更快复现。"
-            )
+            Hint("提交后直接发到开发者这里，不用跳出去用邮件客户端。")
         }
     }
 }

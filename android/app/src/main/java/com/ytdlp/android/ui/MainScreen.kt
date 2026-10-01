@@ -1,10 +1,15 @@
 package com.ytdlp.android.ui
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -42,6 +47,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -103,12 +109,34 @@ fun MainScreen(vm: AppViewModel) {
                         NavigationBarItem(
                             selected = tab == t,
                             onClick = { tab = t },
-                            icon = { Icon(t.icon, contentDescription = t.label, modifier = Modifier.size(22.dp)) },
+                            icon = {
+                                // 选中指示器自己画：M3 的 indicatorColor 只吃纯色，
+                                // 给不了渐变。所以把自带指示器设成透明，在图标槽里
+                                // 铺一个品牌渐变胶囊。未选中时同一个盒子留着占位，
+                                // 这样切换时图标不会左右跳动。
+                                Box(
+                                    Modifier
+                                        .size(width = 46.dp, height = 28.dp)
+                                        .clip(RoundedCornerShape(999.dp))
+                                        .then(
+                                            if (tab == t) Modifier.background(brandBrush)
+                                            else Modifier
+                                        ),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        t.icon,
+                                        contentDescription = t.label,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                }
+                            },
                             label = { Text(t.label, fontSize = Font.hint) },
                             colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = tone.accent,
+                                // 渐变胶囊上必须用白色，蓝色图标压在绿色上是看不清的
+                                selectedIconColor = Color.White,
                                 selectedTextColor = tone.accent,
-                                indicatorColor = tone.accentSoft,
+                                indicatorColor = Color.Transparent,
                                 unselectedIconColor = tone.textMuted,
                                 unselectedTextColor = tone.textMuted,
                             ),
@@ -119,10 +147,22 @@ fun MainScreen(vm: AppViewModel) {
         },
     ) { inner ->
         Box(Modifier.fillMaxSize().padding(inner)) {
-            when (tab) {
-                Tab.Parse -> ParseScreen(vm)
-                Tab.History -> HistoryScreen(vm)
-                Tab.Settings -> SettingsScreen(vm)
+            // 页面切换改成淡入 + 轻微上移：原来 `when` 是硬切，从解析页跳到历史页
+            // 会「啪」地换一整屏，找不到方向感。位移只有屏高的 1/20，
+            // 是个方向暗示，不是动画表演。
+            AnimatedContent(
+                targetState = tab,
+                transitionSpec = {
+                    (fadeIn(tween(180)) + slideInVertically(tween(180)) { it / 20 }) togetherWith
+                        fadeOut(tween(120))
+                },
+                label = "tab",
+            ) { current ->
+                when (current) {
+                    Tab.Parse -> ParseScreen(vm)
+                    Tab.History -> HistoryScreen(vm)
+                    Tab.Settings -> SettingsScreen(vm)
+                }
             }
         }
     }
@@ -142,10 +182,9 @@ private fun DownloadBar(state: Download, onDismiss: () -> Unit) {
     val visible = state.active || state.isDone || state.isError
     if (!visible) return
 
-    val accent = when {
-        state.isError -> tone.danger
-        else -> tone.accent
-    }
+    // 进行中铺品牌渐变（这是全应用最显眼的「标识位」），出错换 danger 纯色 ——
+    // 失败不该长成品牌的样子，红得干脆才对
+    val fill = if (state.isError) Modifier.background(tone.danger) else Modifier.background(brandBrush)
     val label = when (state.type) {
         "starting" -> "正在准备下载…"
         "progress" -> "正在下载"
@@ -235,7 +274,7 @@ private fun DownloadBar(state: Download, onDismiss: () -> Unit) {
                     Modifier
                         .fillMaxSize()
                         .alpha(alpha)
-                        .background(accent)
+                        .then(fill)
                 )
             } else {
                 val fraction = ((state.percent ?: if (state.isDone) 100.0 else 0.0) / 100.0)
@@ -245,7 +284,7 @@ private fun DownloadBar(state: Download, onDismiss: () -> Unit) {
                         .fillMaxWidth(fraction)
                         .fillMaxHeight()
                         .clip(RoundedCornerShape(999.dp))
-                        .background(accent)
+                        .then(fill)
                 )
             }
         }

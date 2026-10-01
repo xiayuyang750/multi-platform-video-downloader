@@ -9,6 +9,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ytdlp.android.ui.AppViewModel
 import com.ytdlp.android.ui.MainScreen
@@ -32,9 +33,12 @@ class MainActivity : ComponentActivity() {
         sharedUrl = extractUrl(intent)
 
         setContent {
-            YtdlpTheme {
-                val vm: AppViewModel = viewModel()
+            // ViewModel 必须比 YtdlpTheme 先取到：外观偏好在 VM 里，而主题是
+            // 整个界面的最外层包装。顺序反了就拿不到状态，切换外观不会生效。
+            val vm: AppViewModel = viewModel()
+            val themeMode by vm.themeMode.collectAsStateWithLifecycle()
 
+            YtdlpTheme(mode = themeMode) {
                 // 别人分享链接过来时，直接填进输入框并自动解析 ——
                 // 用户点「分享」的意图本来就是「我要处理这个链接」，
                 // 再多点一次「解析」是多余的。

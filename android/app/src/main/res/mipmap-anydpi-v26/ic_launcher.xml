@@ -2,15 +2,18 @@
 <!--
   应用图标（自适应图标，Android 8.0+）。
 
-  用纯矢量绘制，不放 PNG：minSdk 是 26，正好是自适应图标的最低版本，
-  所以一份 XML 就能覆盖全部设备，不必再为每种密度出图。
+  这里只描述「分层」这件事，具体图形在 drawable 里：
+  - background：薄荷→天蓝的渐变
+  - foreground：白色圆角方块 + 镂空播放三角
+  - monochrome：给 Android 13+ 主题图标用，系统会把它的不透明区域重新上色，
+    所以直接复用前景层即可（它本来就是单色轮廓）
 
-  图案含义：播放三角 + 下方一条进度线 —— 一眼能看出「能看、也能下」。
-  配色取自设计令牌的 accent（#3563E9），与两端界面同源。
+  另外 mipmap-<density>/ic_launcher.png 是同一套图案的位图版，两处都要留：
+  自适应图标只有系统认识，而文件管理器、应用商店这类第三方工具解析 APK 时
+  只会去找传统位图 —— 缺了它，安装前的安装包就是没有图标的。
 -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/ic_launcher_background" />
+    <background android:drawable="@drawable/ic_launcher_background" />
     <foreground android:drawable="@drawable/ic_launcher_foreground" />
-    <!-- Android 13+ 的主题图标（跟随系统取色） -->
     <monochrome android:drawable="@drawable/ic_launcher_foreground" />
 </adaptive-icon>

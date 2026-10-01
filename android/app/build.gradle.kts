@@ -34,9 +34,10 @@ android {
         applicationId = "com.ytdlp.android"
         minSdk = 26
         targetSdk = 36
-        // 1.0.1：抖音改为直接调公开接口（修复装完解析不了抖音的问题）
-        versionCode = 2
-        versionName = "1.0.1"
+        // 1.0.3：界面视觉焕新（品牌渐变、卡片质感、动效），安卓端自此与网页端
+        // 各自演进 —— 详见 ui/Theme.kt 顶部注释
+        versionCode = 3
+        versionName = "1.0.3"
 
         ndk {
             // Chaquopy 的 Python 解释器是原生组件，必须显式声明 ABI。
@@ -92,6 +93,17 @@ android {
     }
 }
 
+// 产物直接叫「水印工坊.apk」，而不是默认的 app-release.apk ——
+// 用户拿到手、在文件管理器里看到的就是这个可读的名字。
+// 版本号不塞进文件名：名字保持固定，版本信息由 APK 内部和发布页承担。
+androidComponents {
+    onVariants { variant ->
+        variant.outputs.forEach { output ->
+            output.outputFileName.set("水印工坊.apk")
+        }
+    }
+}
+
 chaquopy {
     defaultConfig {
         // buildPython 的大版本必须和 app 的 Python 版本一致，微版本无所谓。
@@ -111,6 +123,11 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
+    // 页面转场（AnimatedContent）、卡片展开（animateContentSize）、选中态变色
+    // （animateColorAsState）都在这个 artifact 里。它本来就是 foundation / material3
+    // 的运行时依赖，所以不会让 APK 变大 —— 显式声明只是为了让它出现在**编译**类路径上
+    // （implementation 级别的传递依赖不进编译类路径，写代码时会报 Unresolved reference）。
+    implementation("androidx.compose.animation:animation")
     implementation("androidx.activity:activity-compose:1.13.0")
     // 状态管理用 ViewModel：解析是几十秒的长任务，转屏或切后台不能把
     // 进行中的状态丢掉；collectAsStateWithLifecycle 则保证界面不可见时停订阅

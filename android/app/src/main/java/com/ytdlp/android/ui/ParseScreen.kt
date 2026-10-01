@@ -7,6 +7,12 @@ import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -34,9 +40,18 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
@@ -56,6 +71,22 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
     val needStoragePerm by vm.needStoragePermission.collectAsStateWithLifecycle()
     val uriHandler = LocalUriHandler.current
     val context = LocalContext.current
+
+    // 输入框聚焦柔光的强度，0→1。不做成瞬时切换，150ms 过渡看着才不像闪一下。
+    var focused by remember { mutableStateOf(false) }
+    val glow by animateFloatAsState(
+        targetValue = if (focused) 1f else 0f,
+        animationSpec = tween(150),
+        label = "input-glow",
+    )
+    // 颜色也要先在 composable 作用域里取出来：drawBehind 的 lambda 是绘制阶段的
+    // 普通 lambda，在里面读 tone（@Composable 属性）编译不过。
+    //
+    // 为什么不用网页端那个 accent-soft（#EEF2FE）：实测过，它铺在 #F5F6F8 的页面底上
+    // 只让颜色从 F5F6F8 变到约 F8F9FA —— 肉眼看不出有任何变化，这一圈等于白画。
+    // 改用 accent 蓝的 15% 透明度：浅色下约 #D8E0F6、深色下约 #1E263C，都能看到
+    // 一圈柔和的蓝色轮廓，但仍然不是硬边。
+    val glowColor = tone.accent.copy(alpha = 0.15f)
 
     // 抖音的浏览器模式解析页。它是个独立 Activity（WebView 需要窗口），
     // 解析完通过 setResult 把数据交回来。
@@ -108,37 +139,61 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 horizontalArrangement = Arrangement.spacedBy(Dim.gap),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                OutlinedTextField(
-                    value = url,
-                    onValueChange = vm::onUrlChange,
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("粘贴视频链接…", fontSize = Font.body) },
-                    singleLine = true,
-                    shape = RoundedCornerShape(Dim.radiusSm),
-                    trailingIcon = {
-                        if (url.isNotEmpty()) {
-                            IconButton(onClick = { vm.onUrlChange("") }) {
-                                Icon(
-                                    Icons.Default.Close,
-                                    contentDescription = "清空",
-                                    tint = tone.textMuted,
+                Box(
+                    Modifier
+                        .weight(1f)
+                        // 聚焦柔光：网页端 .input:focus 有 `box-shadow: 0 0 0 3px accent-soft`，
+                        // 安卓侧之前漏了，输入框获得焦点只是边框变个色，不够明确。
+                        //
+                        // 用 drawBehind 往外画一圈、而不是「加 padding 再铺底色」：
+                        // 后者会把这个 Row 撑高 6dp，输入框和下面的按钮间距跟着变；
+                        // drawBehind 画在布局边界之外，不占任何空间，零布局影响。
+                        .drawBehind {
+                            if (glow > 0f) {
+                                val r = 3.dp.toPx()
+                                drawRoundRect(
+                                    color = glowColor.copy(alpha = glowColor.alpha * glow),
+                                    topLeft = Offset(-r, -r),
+                                    size = Size(size.width + r * 2, size.height + r * 2),
+                                    cornerRadius = CornerRadius(Dim.radiusSm.toPx() + r),
                                 )
                             }
                         }
-                    },
-                    // 键盘上直接把「回车」变成「解析」，少一次点击
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                    keyboardActions = KeyboardActions(onGo = { vm.parse() }),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = tone.accent,
-                        unfocusedBorderColor = tone.border,
-                        focusedContainerColor = tone.surface,
-                        unfocusedContainerColor = tone.surface,
-                        focusedTextColor = tone.text,
-                        unfocusedTextColor = tone.text,
-                        cursorColor = tone.accent,
-                    ),
-                )
+                ) {
+                    OutlinedTextField(
+                        value = url,
+                        onValueChange = vm::onUrlChange,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .onFocusChanged { focused = it.isFocused },
+                        placeholder = { Text("粘贴视频链接…", fontSize = Font.body) },
+                        singleLine = true,
+                        shape = RoundedCornerShape(Dim.radiusSm),
+                        trailingIcon = {
+                            if (url.isNotEmpty()) {
+                                IconButton(onClick = { vm.onUrlChange("") }) {
+                                    Icon(
+                                        Icons.Default.Close,
+                                        contentDescription = "清空",
+                                        tint = tone.textMuted,
+                                    )
+                                }
+                            }
+                        },
+                        // 键盘上直接把「回车」变成「解析」，少一次点击
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                        keyboardActions = KeyboardActions(onGo = { vm.parse() }),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = tone.accent,
+                            unfocusedBorderColor = tone.border,
+                            focusedContainerColor = tone.surface,
+                            unfocusedContainerColor = tone.surface,
+                            focusedTextColor = tone.text,
+                            unfocusedTextColor = tone.text,
+                            cursorColor = tone.accent,
+                        ),
+                    )
+                }
                 GhostButton(text = "粘贴", onClick = vm::pasteFromClipboard)
             }
 
@@ -160,7 +215,10 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
 
             Hint(
                 "支持直接粘贴整段分享文案，会自动提取其中的链接。\n" +
-                    "支持 YouTube / B站 / 抖音 / TikTok / X / Instagram，境外站点需要开着 VPN。"
+                    // 加「等」是必要的：实际认哪些站点由底层的 yt-dlp 决定，
+                    // 下面这六个只是我们实测过的，写死成「只支持这六个」不属实。
+                    "支持 YouTube / B站 / 抖音 / TikTok / X / Instagram 等平台" +
+                    "（底层是 yt-dlp，能认的远不止这几个）。境外站点需要开着 VPN。"
             )
         }
 
@@ -228,13 +286,25 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 }
             }
 
-            is ParseUi.Done -> ResultCard(
-                video = state.video,
-                download = download,
-                onDownload = vm::startDownload,
-                onCopy = { vm.copyText(state.video.sourceUrl) },
-                onOpenSource = { uriHandler.openUriSafe(state.video.sourceUrl) },
-            )
+            // 结果卡片淡入 + 轻微上移。key 用原始链接：换了个视频才重播，
+            // 同一个结果因重组重新绘制时不闪。
+            is ParseUi.Done -> key(state.video.sourceUrl) {
+                val appear = remember {
+                    MutableTransitionState(false).apply { targetState = true }
+                }
+                AnimatedVisibility(
+                    visibleState = appear,
+                    enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 12 },
+                ) {
+                    ResultCard(
+                        video = state.video,
+                        download = download,
+                        onDownload = vm::startDownload,
+                        onCopy = { vm.copyText(state.video.sourceUrl) },
+                        onOpenSource = { uriHandler.openUriSafe(state.video.sourceUrl) },
+                    )
+                }
+            }
         }
     }
 }

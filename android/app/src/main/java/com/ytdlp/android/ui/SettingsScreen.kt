@@ -27,7 +27,6 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ytdlp.android.BuildConfig
 import com.ytdlp.android.FeedbackActivity
-import com.ytdlp.android.ProbeActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -38,6 +37,7 @@ import java.io.File
 fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
     val state by vm.settings.collectAsStateWithLifecycle()
     val update by vm.update.collectAsStateWithLifecycle()
+    val themeMode by vm.themeMode.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val scope = rememberCoroutineScope()
@@ -95,6 +95,23 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
             }
         }
 
+        // ---- 外观 ----
+        // 放在「正在读取设置」那个提前 return 之前：外观是纯 UI 偏好，
+        // 不依赖引擎，没道理等 Python 那趟往返回来才让用户看到。
+        Card {
+            FieldLabel("外观")
+            Spacer12()
+            Row(horizontalArrangement = Arrangement.spacedBy(Dim.gapSm)) {
+                ThemeMode.entries.forEach { m ->
+                    SelectChip(
+                        label = m.label,
+                        selected = themeMode == m,
+                        onClick = { vm.setThemeMode(m) },
+                    )
+                }
+            }
+        }
+
         val s = state.settings
         if (s == null) {
             Text("正在读取设置…", fontSize = Font.meta, color = tone.textMuted)
@@ -110,16 +127,16 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 fontSize = Font.meta,
                 color = tone.text,
             )
-            Spacer12()
+            // 正常情况只给路径，不再解释一遍：解析页的授权引导已经把「存哪、
+            // 为什么」说完了，这里再说就是重复。
+            // 只有真落到私有目录时才说明原因 —— 那正是用户会疑惑「文件去哪了」的时候。
             if (s.outputDirIsFallback) {
-                // 如实说明为什么没用系统下载目录：用户找不到文件时要有据可查
+                Spacer12()
                 Hint(
-                    "当前用的是应用私有目录。系统「下载」目录（${s.preferredDir}）" +
-                        "需要存储权限才能写入，授权后会自动改回去。\n" +
-                        "私有目录里的文件无法用文件管理器直接看到，只能通过应用内分享导出。"
+                    "现在用的是应用私有目录：系统「下载」目录（${s.preferredDir}）" +
+                        "要存储权限才写得进去。\n" +
+                        "私有目录里的文件用文件管理器看不到，只能通过应用内分享导出。"
                 )
-            } else {
-                Hint("文件会保存在系统的「下载」目录，用文件管理器就能找到。")
             }
         }
 
@@ -134,8 +151,8 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
             )
             Spacer12()
             Hint(
-                "只有 X（推特）和 Instagram 需要它 —— 这两个平台不登录就解析不了。\n" +
-                    "YouTube 不要导入：实测带 Cookie 会把画质从 1080p 降到 360p。\n" +
+                "X（推特）、Instagram、TikTok 需要它 —— 这几个不登录就解析不了；" +
+                    "YouTube 反而不能用（会把画质从 1080p 降到 360p）。\n" +
                     "导出方法：用浏览器扩展导出 Netscape 格式的 cookies.txt，" +
                     "导出前确保处于登录状态。"
             )
@@ -157,12 +174,16 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
             }
         }
 
-        // ---- 反馈与诊断 ----
+        // ---- 反馈 ----
+        // 引擎自检页的入口从这里删掉了：它是调试页，一进去会自动跑三条网络解析，
+        // 用户看了只会以为应用卡死或偷跑流量。页面本身保留（调试版/adb 仍可打开），
+        // 详见 AndroidManifest 里 ProbeActivity 的注释。
         Card {
             FieldLabel("遇到问题？")
             Spacer12()
             Hint(
-                "解析不了、下载报错、界面不对劲，都可以直接反馈给我。" +
+                "解析不了、下载报错、界面不对劲，这些当然可以反馈；" +
+                    "但不只是报错 —— 觉得哪里不好用、想加什么功能、有更好的做法，也都可以说。\n" +
                     "平台和链接写清楚的话，我复现会快很多。"
             )
             Spacer12()
@@ -171,21 +192,6 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 onClick = {
                     runCatching {
                         context.startActivity(Intent(context, FeedbackActivity::class.java))
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer12()
-            Hint(
-                "想自己先排查的话，可以打开自检页跑一遍 —— " +
-                    "它会如实列出引擎状态和原始报错。"
-            )
-            Spacer12()
-            GhostButton(
-                text = "打开引擎自检页",
-                onClick = {
-                    runCatching {
-                        context.startActivity(Intent(context, ProbeActivity::class.java))
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -259,18 +265,24 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 enabled = update !is UpdateUi.Checking,
                 modifier = Modifier.fillMaxWidth(),
             )
-            Spacer12()
-            Hint("从项目的 GitHub Releases 读取最新版本。国内直连 GitHub 通常不通，需要开启代理。")
         }
 
         // ---- 关于 ----
         Card {
             FieldLabel("关于")
             Spacer12()
+            // 这里刻意写全：解析下载只是 yt-dlp，但整个链路远不止它 ——
+            // 合流、画质解锁、抖音、X 备用链路各有各的实现，只说「由 yt-dlp 完成」
+            // 既不准确，也让用户遇到问题时不知道该往哪个方向想。
             Hint(
-                "解析与下载由 yt-dlp 完成，音视频合流用内置的 ffmpeg，" +
-                    "YouTube 的画质解锁靠内置的 JS 运行时。\n" +
-                    "反馈渠道打不开时，也可以直接发邮件到 ${FEEDBACK_MAIL}。"
+                // 支持范围放最前面：这是用户最需要先知道的一条，比技术栈重要得多。
+                "图文、实况图、图集这类内容的平台链接，解析功能正在开发中。" +
+                    "目前只支持视频和音频。\n" +
+                    "解析与下载由 yt-dlp 完成；音视频合流用随包分发的自编译 ffmpeg；" +
+                    "YouTube 的画质解锁靠自编译的 JS 运行时。\n" +
+                    "抖音走内置浏览器模式 —— 它的接口要签名和登录态，纯 HTTP 拿不到；" +
+                    "X 在官方接口失效时走备用链路。\n" +
+                    "反馈渠道打不开时可以发邮件到 ${FEEDBACK_MAIL}，记得备注主题或来意。"
             )
         }
     }

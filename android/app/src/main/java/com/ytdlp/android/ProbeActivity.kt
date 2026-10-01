@@ -22,8 +22,13 @@ import java.io.File
  * 就得先怀疑「是引擎坏了还是界面写错了」。正式界面见 MainActivity。
  *
  * 本页刻意做得又丑又直白（按钮 + 裸日志），因为它的唯一职责是把引擎的返回值
- * 原样摊在屏幕上，方便对着 logcat 排查。启动方式：
+ * 原样摊在屏幕上，方便对着 logcat 排查。
+ *
+ * v1.0.3 起设置页里的入口已删除（会被拿来当诊断入口点，成本远大于收益），
+ * **只能**这样启动：
  *   adb shell am start -n com.ytdlp.android/.ProbeActivity
+ * 为此清单里它被设为 exported="true" —— 之前是 false，那句「只能用 adb 启动」
+ * 的说明其实从来没成立过，adb 会被 SecurityException 拒掉。
  */
 class ProbeActivity : Activity() {
 

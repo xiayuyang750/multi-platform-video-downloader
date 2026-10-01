@@ -24,6 +24,7 @@
     "x.com": { "use_cookies": true, "reason": "X(Twitter) 对未登录访问限制严格，不带 cookie 会报「No video could be found in this tweet」；带 cookie 实测可解析出 1080p" },
     "twitter.com": { "use_cookies": true, "reason": "同上" },
     "instagram.com": { "use_cookies": true, "reason": "Instagram 需要登录态，未登录会要求 fresh cookies" },
-    "douyin.com": { "use_cookies": false, "status": "webview", "reason": "yt-dlp 走不通（须 a_bogus 签名 + 登录态）。安卓端改用 WebView 监听接口响应拿无水印直链，不需要 cookie" }
+    "douyin.com": { "use_cookies": false, "status": "webview", "reason": "yt-dlp 走不通（须 a_bogus 签名 + 登录态）。安卓端改用 WebView 监听接口响应拿无水印直链，不需要 cookie" },
+    "tiktok.com": { "use_cookies": true, "reason": "TikTok 要登录态，未登录常报 fresh cookies。v1.0.3 才补上这一项 —— 此前整项缺失，use_cookies 取不到值，导致导入的 cookies.txt 对 TikTok 完全不生效。注意：尚未在真机上实测，且能否访问还取决于所在地区" }
   }
 }

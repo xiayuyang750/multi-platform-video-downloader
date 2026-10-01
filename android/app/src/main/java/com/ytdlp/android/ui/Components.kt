@@ -1,8 +1,13 @@
 package com.ytdlp.android.ui
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,11 +24,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -66,22 +74,47 @@ fun PlatformBadge(platform: String, size: Int = 18) {
     }
 }
 
-/** 卡片容器，对应网页端的 .card。 */
+/**
+ * 卡片容器，对应网页端的 .card。
+ *
+ * 阴影 + 描边一起用：只描边是「线框」，看着像表格；只阴影在浅色背景上又太糊。
+ * 网页端本来就是 `border` 和 `box-shadow: var(--shadow-sm)` 并存的，这里对齐它。
+ * 深色下 elevation 为 0（见 Tone.cardElevation），只留描边。
+ */
 @Composable
 fun Card(
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
 ) {
+    val shape = RoundedCornerShape(Dim.radius)
     Box(
         modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(Dim.radius))
+            .shadow(tone.cardElevation, shape)
+            .clip(shape)
             .background(tone.surface)
-            .border(1.dp, tone.border, RoundedCornerShape(Dim.radius))
+            .border(1.dp, tone.border, shape)
             .padding(Dim.cardPadding)
     ) {
         Column { content() }
     }
+}
+
+/**
+ * 按下时轻微缩小的触感反馈。
+ *
+ * Material3 的按钮只有水波纹，手指按下去的那一瞬间「没反应」—— 水波纹是从触点
+ * 扩散开的，等它铺满按钮时手指往往已经抬起来了。加一点缩放，按下去立刻有回应。
+ * 幅度刻意压到 0.97：再大就成了「弹跳动画」，工具类应用不该这么活泼。
+ */
+@Composable
+private fun pressedScale(interaction: MutableInteractionSource): Float {
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.97f else 1f,
+        label = "pressed-scale",
+    )
+    return scale
 }
 
 /** 主按钮（实心 accent）。 */
@@ -92,10 +125,15 @@ fun PrimaryButton(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
+    val interaction = remember { MutableInteractionSource() }
+    val scale = pressedScale(interaction)
     Button(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.defaultMinSize(minHeight = Dim.touchTarget),
+        interactionSource = interaction,
+        modifier = modifier
+            .defaultMinSize(minHeight = Dim.touchTarget)
+            .graphicsLayer { scaleX = scale; scaleY = scale },
         shape = RoundedCornerShape(Dim.radiusSm),
         colors = ButtonDefaults.buttonColors(
             containerColor = tone.accent,
@@ -116,14 +154,67 @@ fun GhostButton(
     danger: Boolean = false,
 ) {
     val fg = if (danger) tone.danger else tone.text
+    val interaction = remember { MutableInteractionSource() }
+    val scale = pressedScale(interaction)
     OutlinedButton(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.defaultMinSize(minHeight = Dim.touchTarget),
+        interactionSource = interaction,
+        modifier = modifier
+            .defaultMinSize(minHeight = Dim.touchTarget)
+            .graphicsLayer { scaleX = scale; scaleY = scale },
         shape = RoundedCornerShape(Dim.radiusSm),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = fg),
     ) {
         Text(text, fontSize = Font.body, fontWeight = FontWeight.Medium)
+    }
+}
+
+/**
+ * 可选中的胶囊标签。历史页的平台筛选、设置页的外观选择共用这一个 ——
+ * 同一个视觉元素在两处各写一份，是这类界面最容易悄悄跑偏的地方。
+ *
+ * @param badge 右侧的计数徽章；没有计数可显示的场景（如外观选择）传 null。
+ */
+@Composable
+fun SelectChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    badge: Int? = null,
+) {
+    // 选中态做颜色过渡。硬切的话，点一下整个胶囊「啪」地换色，横向滑动切换时尤其明显。
+    val bg by animateColorAsState(
+        if (selected) tone.accentSoft else tone.surface,
+        label = "chip-bg",
+    )
+    val line by animateColorAsState(
+        if (selected) tone.accent else tone.border,
+        label = "chip-border",
+    )
+    val fg by animateColorAsState(
+        if (selected) tone.accent else tone.textMuted,
+        label = "chip-fg",
+    )
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(bg)
+            .border(1.dp, line, RoundedCornerShape(999.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            label,
+            fontSize = Font.meta,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = fg,
+        )
+        if (badge != null) {
+            Text(badge.toString(), fontSize = Font.tabBadge, color = fg)
+        }
     }
 }
 

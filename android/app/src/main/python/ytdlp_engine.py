@@ -602,6 +602,16 @@ class Engine:
         return (self._user.get("cookies_file") or "").strip()
 
     def get_settings(self) -> dict:
+        # 每次都重新探测一次输出目录，而不是读 __init__ 里缓存的那个值。
+        #
+        # 为什么：能不能写进系统「下载」目录完全取决于存储权限，而权限是用户随时
+        # 可以授予或撤销的。缓存住会造出一个假象 —— 用户先开应用（无权限，落到
+        # 私有目录），再去系统设置里授权，回到设置页却仍然显示私有目录，
+        # 而界面上写着「授权后会自动改回去」。实测就是这个表现。
+        #
+        # 探测本身只是往候选目录写一个空文件再删掉，代价可以忽略；
+        # 用户手动指定的目录依然优先（_pick_output_dir 先看 override）。
+        self._output_dir = self._pick_output_dir()
         return {
             "output_dir": self._output_dir,
             "output_dir_is_fallback": self._output_dir != self._preferred_dir,

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.ui.Modifier
 import com.ytdlp.android.ui.FeedbackScreen
+import com.ytdlp.android.ui.ThemePrefs
 import com.ytdlp.android.ui.YtdlpTheme
 import com.ytdlp.android.ui.tone
 
@@ -26,8 +27,14 @@ class FeedbackActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
+        // 反馈页是个独立 Activity，没有 AppViewModel，所以直接读持久化的外观偏好 ——
+        // 不读的话会出现「App 是深色、点进反馈页却变成浅色」这种割裂。
+        // 在 onCreate 里读一次而不是在组合里 remember：SharedPreferences 首次
+        // 访问是磁盘 I/O，不该塞进组合/绘制路径。
+        val themeMode = ThemePrefs.load(this)
+
         setContent {
-            YtdlpTheme {
+            YtdlpTheme(mode = themeMode) {
                 Scaffold(containerColor = tone.bg) { inner ->
                     FeedbackScreen(
                         onBack = { finish() },
