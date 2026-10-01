@@ -26,6 +26,7 @@ import re
 import sqlite3
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -59,6 +60,97 @@ def detect_platform(url: str) -> str:
         if re.search(pattern, u, re.I):
             return name
     return "其他"
+
+
+# ==================== 抖音：直接调公开接口 ====================
+# 这条路径的发现过程：对比一个能稳定解析抖音的参考实现，从它的 dex 里
+# 提取字符串后发现它调的是 aweme.snssdk.com 这个接口，并把 UA 伪装成
+# 抖音 App 自身。实测这条接口不需要 a_bogus 签名、不需要登录态，直连即可。
+
+DOUYIN_APP_UA = (
+    "com.ss.android.ugc.aweme/260201 (Linux; U; Android 12; zh_CN; Pixel 4; "
+    "Build/SP1A.210812.016; Cronet/TTNetVersion)"
+)
+
+DOUYIN_FEED_API = "https://aweme.snssdk.com/aweme/v1/feed/?aweme_id={id}"
+
+# 展开分享短链时用的普通浏览器 UA
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+def douyin_video_id(url: str) -> str:
+    """从抖音分享链接里取出作品 ID。
+
+    两种形态都要支持：
+      - 长链 https://www.douyin.com/video/7689396203758521646 → 直接正则
+      - 短链 https://v.douyin.com/XiRYwhL6CnQ/                → 先跟随跳转
+    """
+    text = url or ""
+    m = (
+        re.search(r"/(?:video|note)/(\d{10,25})", text)
+        or re.search(r"modal_id=(\d{10,25})", text)
+    )
+    if m:
+        return m.group(1)
+
+    # 短链要跟随一次跳转才能看到真实地址（实测 302 到 www.douyin.com/video/<id>）
+    if "v.douyin.com" in text or "iesdouyin.com" in text:
+        try:
+            req = urllib.request.Request(text, headers={"User-Agent": _BROWSER_UA})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                final = resp.geturl()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[douyin] 展开短链失败：{exc}")
+            return ""
+        m = re.search(r"/(?:video|note)/(\d{10,25})", final or "")
+        if m:
+            return m.group(1)
+    return ""
+
+
+def douyin_pick_tiers(video: dict) -> tuple:
+    """从 bit_rate 里挑两条地址：能播的最高档、画质最高的档。
+
+    与 Kotlin 侧 DouyinParser.pickTiers 逻辑一致（那边是浏览器模式兜底用的），
+    改一处要同步另一处。
+
+    抖音的 video.play_addr 只是「默认档」，bit_rate 数组才是全部档位。
+    最高码率档通常是 H.265，浏览器和部分设备放不出来；能播的最高档是
+    H.264 + 完整 mp4。所以分开选：play_url 用于播放，download_url 用于下载。
+    """
+    best_play, best_play_key = "", (-1, -1)
+    best_any, best_any_key = "", (-1, -1)
+
+    def better(a: tuple, b: tuple) -> bool:
+        return a[0] > b[0] or (a[0] == b[0] and a[1] > b[1])
+
+    for item in video.get("bit_rate") or []:
+        play = item.get("play_addr") or {}
+        urls = play.get("url_list") or []
+        if not urls:
+            continue
+        url = urls[0]
+        if not url:
+            continue
+        key = (int(play.get("height") or 0), int(item.get("bit_rate") or 0))
+
+        if better(key, best_any_key):
+            best_any_key, best_any = key, url
+
+        is_h265 = int(item.get("is_h265") or 0) != 0
+        if not is_h265 and str(item.get("format") or "") == "mp4" and better(key, best_play_key):
+            best_play_key, best_play = key, url
+
+    # 没有符合的档位就退回默认地址，保证至少有个能用的
+    if not best_play:
+        urls = ((video.get("play_addr") or {}).get("url_list")) or []
+        best_play = urls[0] if urls else ""
+    if not best_any:
+        best_any = best_play
+    return best_play, best_any
 
 
 # ==================== 报错翻译 ====================
@@ -607,26 +699,97 @@ class Engine:
         }
 
     def _parse_douyin(self, url: str, ytdlp_err: str) -> dict:
-        """抖音：本层只负责「举手」，真正取数交给 Kotlin 侧的 WebView。
+        """抖音：优先直接调公开接口；接口不可用才降级到 WebView。
 
-        为什么必须换实现：Windows 端靠 DrissionPage 驱动本机浏览器监听
-        aweme/detail 接口响应，安卓上没有这个能力。但 WebView 本身就是浏览器，
-        用它的 shouldInterceptRequest 拦下同一个接口、再用原生 HTTP 补一次
-        请求即可拿到响应体 —— 分工是「Kotlin 取数、Python 落库」，
-        因为 WebView 只有 Kotlin 侧能用，而库和后续下载都在这一层。
+        为什么改掉原来的纯 WebView 方案：那条路要等页面渲染、再拦截它发出的
+        接口请求，而且结果受 UA 影响 —— 实测移动版 UA 会跳到分享页，
+        数据由服务端直出，全程不触发接口，拦截器只能干等到超时，必须用
+        桌面版 UA 才成。又慢又脆，用户那次失败就是这么来的。
 
-        need_webview 就是两边约定的信号：界面看到它就拉起抖音解析页。
+        对比参考实现后找到了根因：抖音有一个不用签名、不用登录的公开接口，
+        只需把 UA 伪装成抖音 App 自身：
+            https://aweme.snssdk.com/aweme/v1/feed/?aweme_id=<作品ID>
+        实测直连 HTTP 200、秒回，返回的 aweme_list 里就有标题/作者/直链/码率档位。
+        所以把它作为主方案，WebView 退居兜底（接口哪天被关掉还能顶上）。
         """
+        try:
+            return self._parse_douyin_via_api(url)
+        except Exception as exc:  # noqa: BLE001
+            api_err = f"{type(exc).__name__}: {exc}"
+            print(f"[douyin] 接口方案失败，降级到浏览器模式：{api_err}")
+
         return {
             "ok": False,
             "need_webview": True,
             "platform": "抖音",
             "source_url": url,
             "error": (
-                "抖音需要「浏览器模式」解析。yt-dlp 走不通的原因是它需要 a_bogus "
-                "签名和登录态，HTTP 客户端两样都拿不到。\n\n"
-                f"原始报错：{friendly_error(ytdlp_err)}"
+                "抖音解析失败，已自动改用浏览器模式重试。\n"
+                f"接口方式失败原因：{api_err}\n"
+                f"（yt-dlp 的错误：{friendly_error(ytdlp_err)}）"
             ),
+        }
+
+    def _parse_douyin_via_api(self, url: str) -> dict:
+        """直接调抖音公开接口取作品数据。
+
+        全程纯 HTTP，不需要 WebView、不需要登录、不需要签名。
+        失败时抛异常，由调用方决定是否降级到浏览器模式。
+        """
+        vid = douyin_video_id(url)
+        if not vid:
+            raise RuntimeError("没能从链接里识别出作品编号")
+
+        req = urllib.request.Request(
+            DOUYIN_FEED_API.format(id=vid),
+            headers={"User-Agent": DOUYIN_APP_UA},
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = json.loads(resp.read().decode("utf-8", "replace"))
+
+        items = body.get("aweme_list") or []
+        if not items:
+            raise RuntimeError("接口没有返回作品数据（可能作品已删除或设为私享）")
+
+        # 这个接口会顺带返回一串相关推荐，所以必须按 ID 挑出目标作品，
+        # 不能直接取第一条 —— 实测返回 7 条，第一条恰好是目标只是运气好。
+        target = next(
+            (x for x in items if str(x.get("aweme_id") or "") == vid),
+            items[0],
+        )
+
+        video = target.get("video") or {}
+        play_url, download_url = douyin_pick_tiers(video)
+        if not play_url:
+            raise RuntimeError("接口返回里没有可用的视频地址")
+
+        author = target.get("author") or {}
+        cover = ((video.get("cover") or {}).get("url_list") or [""])[0]
+        duration_ms = video.get("duration") or 0
+
+        rec = {
+            "id": str(target.get("aweme_id") or vid),
+            "platform": "抖音",
+            "title": target.get("desc") or "",
+            "uploader": author.get("nickname") or "",
+            "uploader_id": author.get("unique_id") or author.get("short_id") or "",
+            "duration": int(duration_ms // 1000) if duration_ms else None,
+            "thumbnail": cover or "",
+            "source_url": url,
+            # 能直接放进播放器的那条（H.264 + 完整 mp4）
+            "resolved_url": play_url,
+            # 画质最高的那条（可能是 H.265，能下不能播）
+            "download_url": download_url,
+            "resolved_at": int(time.time()),
+            # 抖音直链实测支持 Range，可直接内联播放
+            "play_kind": "progressive",
+        }
+        self.store.upsert(rec)
+        return {
+            "ok": True,
+            **rec,
+            "quality": "原始画质（无水印）",
+            "filesize": "",
         }
 
     def save_douyin(self, payload_json: str) -> dict:
