@@ -34,10 +34,10 @@ android {
         applicationId = "com.ytdlp.android"
         minSdk = 26
         targetSdk = 36
-        // 1.0.3：界面视觉焕新（品牌渐变、卡片质感、动效），安卓端自此与网页端
-        // 各自演进 —— 详见 ui/Theme.kt 顶部注释
-        versionCode = 3
-        versionName = "1.0.3"
+        // 1.0.4：支持抖音图文/图集/实况图与 X 的图片/多视频/图文混排，并修掉
+        // 「伪成功」「播放串台」等一批问题 —— 详见 README 的更新日志
+        versionCode = 4
+        versionName = "1.0.4"
 
         ndk {
             // Chaquopy 的 Python 解释器是原生组件，必须显式声明 ABI。

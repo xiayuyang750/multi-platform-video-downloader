@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sqlite3
 import threading
 import time
@@ -35,8 +36,12 @@ import yt_dlp
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "defaults.json"
 
-# 备用链路拿到的是裸直链（没有元数据），文件名要据此改用「库里标题」拼
-DIRECT_URL_HOSTS = ("douyinvod.com", "video.twimg.com")
+# 直链拿到的是裸地址（没有元数据），文件名要据此改用「库里标题」拼。
+# 抖音这几个域名是实测出来的：采样 160 条直链，全部落在 365yg.com / amemv.com 上，
+# 一条 douyinvod.com 都没有 —— 只认 douyinvod.com 会让文件名退化成 URL 片段
+# （实测会变成「内部路径token [整个查询串].mp4」）。
+# 与 Windows 端 engine.DIRECT_URL_HOSTS 对应，改一处要同步另一处。
+DIRECT_URL_HOSTS = ("douyinvod.com", "365yg.com", "amemv.com", "video.twimg.com")
 
 PLATFORM_RULES = [
     ("YouTube", r"(^|//)([a-z0-9-]+\.)*youtu\.?be"),
@@ -204,8 +209,22 @@ ERROR_HINTS = [
         # 实测在没开代理时解析 Instagram 会抛这个，比 timed out 更常见
         "Network is unreachable",
         "连不上网络。请检查：\n"
-        "① 境外站点（YouTube / Instagram / X / TikTok）需要开着 VPN；\n"
-        "② 国内站点（抖音 / B站）则相反，开着代理走境外节点反而会被拦，请关掉代理。",
+        "① 代理是不是「全局」模式 —— 全局会把国内站点的流量也送出境，"
+        "抖音 / B站 会被拒；这种情况请改成「规则 / 智能分流」或「直连」模式；\n"
+        "② 如果解析的是境外站点（YouTube / Instagram / X / TikTok），"
+        "则需要代理确实在生效。",
+    ),
+    (
+        # 断网时实测抛这个（TLS 握手被截断）。位置很关键：必须排在
+        # "Please report this issue" 之前 —— yt-dlp 会把那句附在所有非预期
+        # 错误后面，排到它后面就会被抢走，于是"没网"被说成"站点改版"。
+        "UNEXPECTED_EOF_WHILE_READING",
+        "连不上网络（连接被中断）。请检查：\n"
+        "① 手机是否连着 Wi-Fi 或流量；\n"
+        "② 代理是不是「全局」模式 —— 全局会把国内站点的流量也送出境，"
+        "抖音 / B站 会被拒；这种情况请改成「规则 / 智能分流」或「直连」模式；\n"
+        "③ 如果解析的是境外站点（YouTube / Instagram / X / TikTok），"
+        "则需要代理确实在生效。",
     ),
     (
         "Unsupported URL",
@@ -436,17 +455,32 @@ class Store:
         # 才是这两类站点唯一的播放途径。
         if "local_path" not in cols:
             self.conn.execute("ALTER TABLE history ADD COLUMN local_path TEXT")
+        # 内容类型与媒体列表。视频是单一文件，而图文/图集/实况图是**多条**记录，
+        # 塞不进 resolved_url 那一个字段，所以单独存一份 JSON。
+        #   content_type: video / images / live
+        #   media_json  : [{"url":..., "width":..., "height":..., "live":...}, ...]
+        if "content_type" not in cols:
+            self.conn.execute("ALTER TABLE history ADD COLUMN content_type TEXT")
+        if "media_json" not in cols:
+            self.conn.execute("ALTER TABLE history ADD COLUMN media_json TEXT")
 
     def upsert(self, rec: dict) -> None:
+        # 图文类没有 resolved_url / download_url / play_kind，这里补默认值，
+        # 免得每条调用点都要自己填一遍。
+        row = {
+            "resolved_url": "", "download_url": "", "play_kind": "none",
+            "content_type": "video", "media_json": "",
+            **rec,
+        }
         with self._write_lock:
             self.conn.execute(
                 """
                 INSERT INTO history (id, platform, title, uploader, uploader_id, duration,
                                      thumbnail, source_url, resolved_url, download_url,
-                                     resolved_at, play_kind)
+                                     resolved_at, play_kind, content_type, media_json)
                 VALUES (:id, :platform, :title, :uploader, :uploader_id, :duration,
                         :thumbnail, :source_url, :resolved_url, :download_url,
-                        :resolved_at, :play_kind)
+                        :resolved_at, :play_kind, :content_type, :media_json)
                 ON CONFLICT(id) DO UPDATE SET
                     platform     = excluded.platform,
                     title        = excluded.title,
@@ -458,9 +492,11 @@ class Store:
                     resolved_url = excluded.resolved_url,
                     download_url = excluded.download_url,
                     resolved_at  = excluded.resolved_at,
-                    play_kind    = excluded.play_kind
+                    play_kind    = excluded.play_kind,
+                    content_type = excluded.content_type,
+                    media_json   = excluded.media_json
                 """,
-                rec,
+                row,
             )
             self.conn.commit()
 
@@ -522,6 +558,28 @@ class DownloadState:
     def snapshot(self) -> dict:
         with self._lock:
             return dict(self._data)
+
+
+def _with_dup_suffix(template: str, n: int) -> str:
+    """给 yt-dlp 的输出模板插一个重名编号：`…%(ext)s` -> `… (1).%(ext)s`。
+
+    插在扩展名之前，而不是整个名字之后 —— 否则 `xxx.mp4 (1)` 这种尾巴
+    在文件管理器里认不出是视频。
+    """
+    marker = ".%(ext)s"
+    if marker in template:
+        return template.replace(marker, f" ({n}){marker}")
+    return f"{template} ({n})"
+
+
+def _ext_from_url(url: str, default: str) -> str:
+    """从媒体地址里认出扩展名。
+
+    图文/图集/实况图本来都是图片（jpg / webp），但 X 的「媒体列表」里可能
+    混着视频，写死 jpg 会把一段 mp4 存成 .jpg —— 相册和播放器都认不出来。
+    """
+    m = re.search(r"\.(jpg|jpeg|png|webp|gif|mp4|mov|webm)(?:\?|$)", (url or "").lower())
+    return f".{m.group(1)}" if m else default
 
 
 def _writable(path: str) -> bool:
@@ -729,6 +787,30 @@ class Engine:
         if not url:
             return {"ok": False, "error": "链接为空"}
 
+        platform = detect_platform(url)
+
+        # 抖音直接走自己的链路，不再先跑一遍 yt-dlp：抖音的接口要 a_bogus 签名
+        # 加登录态，HTTP 客户端两样都拿不到，yt-dlp 必然 403 —— 先跑纯粹是白等。
+        if platform == "抖音":
+            return self._parse_douyin(url)
+
+        # X 把顺序反过来：**先**走第三方链路，yt-dlp 退居兜底。
+        # 原因：FxTwitter 一次能把整条推文里的所有媒体都拿到（多张图、多个视频、
+        # 图文混排），给的还是能直接播放/下载的直链；而 yt-dlp 只能拿到其中一个
+        # 视频，还经常是音视频分轨（界面上根本播不了）。
+        # 早先是「yt-dlp 失败才走第三方」，于是多视频/图文混排永远轮不到第三方，
+        # 图片类更是直接被判成「这条推文里没有视频」。
+        x_err = ""
+        if platform == "X":
+            result = self._parse_x(url)
+            if result.get("ok"):
+                return result
+            # fatal = 这条推文本身没有媒体（纯文字/投票/文章）：换 yt-dlp 也不会
+            # 有结果，直接如实告诉用户，免得白等一轮还看到一堆互相矛盾的提示
+            if result.get("fatal"):
+                return result
+            x_err = result.get("error") or ""
+
         opts = self._base_opts(url)
         opts["format"] = "bv*+ba/b"
         logger = _Logger()
@@ -739,15 +821,11 @@ class Engine:
                 info = ydl.extract_info(url, download=False)
         except Exception as exc:  # noqa: BLE001
             raw = logger.last_error or f"{type(exc).__name__}: {exc}"
-            platform = detect_platform(url)
-            # 抖音走不了 yt-dlp：它需要 a_bogus 签名和登录态，HTTP 客户端
-            # 两样都拿不到，所以必然 403。改走备用链路（见下方说明）。
-            if platform == "抖音":
-                return self._parse_douyin(url, raw)
-            # X 也留一条备用链路：yt-dlp 的 X 提取器依赖官方接口，
-            # 改版或限流时会失效
+            # X 也留一条兜底链路（现在它是兜底：第三方优先，见上面）
             if platform == "X":
-                return self._parse_x(url, raw)
+                # 走到这儿说明第三方和 yt-dlp 都失败了，两段原因都要给出来
+                tip = friendly_error(raw, platform) + self._cookie_hint(url, raw)
+                return {"ok": False, "error": (x_err + "\n" if x_err else "") + tip}
             return {
                 "ok": False,
                 "error": friendly_error(raw, platform) + self._cookie_hint(url, raw),
@@ -761,6 +839,9 @@ class Engine:
             return {"ok": False, "error": "未获取到视频 ID，解析结果不完整"}
 
         self.store.upsert(rec)
+        # 补上历史库里已记录的本地产物路径：先下过再解析同一条时，
+        # 界面要据此直接播本地文件，而不是再提示「需下载才能播放」
+        rec = self._with_local_path(rec)
         return {
             "ok": True,
             **rec,
@@ -768,7 +849,7 @@ class Engine:
             "filesize": self._describe_size(info),
         }
 
-    def _parse_douyin(self, url: str, ytdlp_err: str) -> dict:
+    def _parse_douyin(self, url: str, ytdlp_err: str = "") -> dict:
         """抖音：优先直接调公开接口；接口不可用才降级到 WebView。
 
         为什么改掉原来的纯 WebView 方案：那条路要等页面渲染、再拦截它发出的
@@ -788,16 +869,16 @@ class Engine:
             api_err = f"{type(exc).__name__}: {exc}"
             print(f"[douyin] 接口方案失败，降级到浏览器模式：{api_err}")
 
+        # ytdlp_err 为空表示没跑过 yt-dlp（抖音现在直接走这条链路），此时不提它
+        detail = f"接口方式失败原因：{api_err}"
+        if ytdlp_err:
+            detail += f"\n（yt-dlp 的错误：{friendly_error(ytdlp_err, '抖音')}）"
         return {
             "ok": False,
             "need_webview": True,
             "platform": "抖音",
             "source_url": url,
-            "error": (
-                "抖音解析失败，已自动改用浏览器模式重试。\n"
-                f"接口方式失败原因：{api_err}\n"
-                f"（yt-dlp 的错误：{friendly_error(ytdlp_err, '抖音')}）"
-            ),
+            "error": "抖音解析失败，已自动改用浏览器模式重试。\n" + detail,
         }
 
     def _parse_douyin_via_api(self, url: str) -> dict:
@@ -821,12 +902,20 @@ class Engine:
         if not items:
             raise RuntimeError("接口没有返回作品数据（可能作品已删除或设为私享）")
 
-        # 这个接口会顺带返回一串相关推荐，所以必须按 ID 挑出目标作品，
-        # 不能直接取第一条 —— 实测返回 7 条，第一条恰好是目标只是运气好。
+        # 这个接口是「推荐流」性质的：只有**视频**会被原样带回，图文/图集/实况图
+        # 这类「笔记」它不服务 —— 此时 items 里全是推荐作品，目标 id 不在其中。
+        #
+        # 绝不能退回 items[0]：实测 7 条不同的图集/实况图链接会拿到**同一条无关视频**，
+        # 而界面显示「解析成功」，用户会把别人的视频当成自己的内容下走（伪成功）。
+        # 取不到就明确失败，交给上层降级到 WebView（那里能从页面主文档里拿到笔记数据）。
         target = next(
             (x for x in items if str(x.get("aweme_id") or "") == vid),
-            items[0],
+            None,
         )
+        if target is None:
+            raise RuntimeError(
+                f"接口返回的 {len(items)} 条里没有这条作品（疑似图文/图集类内容），转浏览器模式"
+            )
 
         video = target.get("video") or {}
         play_url, download_url = douyin_pick_tiers(video)
@@ -857,7 +946,7 @@ class Engine:
         self.store.upsert(rec)
         return {
             "ok": True,
-            **rec,
+            **self._with_local_path(rec),
             "quality": "原始画质（无水印）",
             "filesize": "",
         }
@@ -869,6 +958,9 @@ class Engine:
         """
         data = json.loads(payload_json)
         url = (data.get("source_url") or "").strip()
+        media = data.get("media") or []
+        ctype = data.get("content_type") or "video"
+        count = len(media)
         rec = {
             "id": str(data.get("id") or url),
             "platform": "抖音",
@@ -876,49 +968,68 @@ class Engine:
             "uploader": data.get("uploader") or "",
             "uploader_id": data.get("uploader_id") or "",
             "duration": data.get("duration"),
+            # 图文类的封面就是第一张图
             "thumbnail": data.get("thumbnail") or "",
             "source_url": url,
-            # 能直接放进播放器的那条（H.264 + 完整 mp4）
+            # 能直接放进播放器的那条（H.264 + 完整 mp4）；图文类没有，为空
             "resolved_url": data.get("play_url") or "",
             # 画质最高的那条（可能是 H.265，能下不能播）
             "download_url": data.get("download_url") or "",
             "resolved_at": int(time.time()),
             # 抖音直链实测返回 206 + video/mp4，支持 Range，可直接内联播放
-            "play_kind": "progressive",
+            "play_kind": "progressive" if (data.get("play_url") or "") else "none",
+            "content_type": ctype,
+            # 图文/图集/实况图是**多条**媒体，塞不进 resolved_url，单独存一份 JSON
+            "media_json": json.dumps(media, ensure_ascii=False) if media else "",
         }
         self.store.upsert(rec)
+        if ctype == "images":
+            quality = f"图文 · 共 {count} 张"
+        elif ctype == "live":
+            quality = f"实况图 · 共 {count} 张"
+        else:
+            quality = "原始画质（无水印）"
         return {
             "ok": True,
-            **rec,
-            "quality": "原始画质（无水印）",
+            **self._with_local_path(rec),
+            "quality": quality,
             "filesize": "",
             # 界面据此提示用户「用的是浏览器模式」，解释为什么要多等一会儿
             "via": "browser",
         }
 
-    def _parse_x(self, url: str, ytdlp_err: str) -> dict:
-        """X 备用链路：调第三方 FxTwitter 服务拿直链。
+    def _parse_x(self, url: str, ytdlp_err: str = "") -> dict:
+        """X 的第三方链路：调 FxTwitter 拿直链。
 
         纯 HTTP，不需要浏览器，所以安卓上能和 Windows 端做到完全一致。
+
+        注意这条链路现在是 X 的**首选**（不是兜底）：它一次能把整条推文里的
+        所有媒体都拿到，而 yt-dlp 只能拿到其中一个视频。见 parse_url 里的说明。
         """
         try:
-            from x_fallback import XFallbackError, resolve
+            from x_fallback import XFallbackError, XNoMediaError, resolve
 
             data = resolve(url)
+        except XNoMediaError as exc:
+            # 「这条推文本就没有媒体」是定论：换 yt-dlp、补 Cookie 都不会有用。
+            # 标成 fatal，让 parse_url 别再往下试、也别提示去查 Cookie。
+            return {"ok": False, "fatal": True, "error": f"X 解析失败：{exc}"}
         except XFallbackError as exc:
-            return {
-                "ok": False,
-                "error": (f"X 备用解析失败：{exc}\n"
-                          f"（主方案 yt-dlp 的错误：{friendly_error(ytdlp_err, 'X')}）"
-                          # 这里必须补上 Cookie 提示：X 一旦 yt-dlp 失败就必进备用链路，
-                          # 而上面那句翻译会把「缺 Cookie」说成「这条推文里没有视频」，
-                          # 用户会照着错的方向去查。注意 windows/engine.py 目前没补，
-                          # 属于两端的已知差异。
-                          + self._cookie_hint(url, ytdlp_err)),
-            }
+            # ytdlp_err 为空表示本来就是首选链路，没有"主方案的错误"可拼
+            base = f"X 解析失败：{exc}"
+            if ytdlp_err:
+                base += (f"\n（yt-dlp 的错误：{friendly_error(ytdlp_err, 'X')}）"
+                         # 走这儿说明两条链路都失败，补上 Cookie 提示 —— 否则那句翻译
+                         # 会把「缺 Cookie」说成「这条推文里没有视频」，用户会查错方向
+                         + self._cookie_hint(url, ytdlp_err))
+            return {"ok": False, "error": base}
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": f"X 备用解析异常：{type(exc).__name__}: {exc}"}
+            return {"ok": False, "error": f"X 解析异常：{type(exc).__name__}: {exc}"}
 
+        # 一条推文里可能有好几样（图集、多视频、图文混排），和抖音那边一样
+        # 存成「媒体列表 + 内容类型」，下游的展示/下载都按这个列表走。
+        media = data.get("media") or []
+        ctype = data.get("content_type") or "video"
         rec = {
             "id": data.get("id") or url,
             "platform": "X",
@@ -931,13 +1042,21 @@ class Engine:
             "resolved_url": data.get("play_url") or "",
             "download_url": data.get("download_url") or "",
             "resolved_at": int(time.time()),
-            "play_kind": "progressive",
+            "play_kind": "progressive" if (data.get("play_url") or "") else "none",
+            "content_type": ctype,
+            "media_json": json.dumps(media, ensure_ascii=False) if media else "",
         }
         self.store.upsert(rec)
+        if ctype == "images":
+            quality = f"图集 · 共 {len(media)} 项"
+        elif ctype == "live":
+            quality = f"实况图 · 共 {len(media)} 项"
+        else:
+            quality = "最高画质（第三方服务解析）"
         return {
             "ok": True,
             **rec,
-            "quality": "最高画质（第三方服务解析）",
+            "quality": quality,
             "filesize": "",
             # 界面据此提示用的是备用通道，便于用户理解为什么偶尔会慢/失败
             "via": "service",
@@ -959,7 +1078,8 @@ class Engine:
                 return rec.get("download_url") or rec.get("resolved_url") or url
         return url
 
-    def start_download(self, url: str) -> dict:
+    def start_download(self, url: str, index: int = 0) -> dict:
+        """开始下载。[index] 只对图文/图集有意义：0 = 全部，N = 只下第 N 张。"""
         url = (url or "").strip()
         if not url:
             return {"ok": False, "error": "链接为空"}
@@ -969,9 +1089,12 @@ class Engine:
                 return {"ok": False, "error": "已有下载任务正在进行，请等它完成"}
             self._dl_busy = True
 
+        # url 是给界面用的：下载状态是全局的（同一时刻只有一个任务），
+        # 界面只有知道「这条状态属于哪个视频」，才不会把上一次的产物
+        # 拿去播当前这条解析结果。update 是合并写入，所以只在这里给一次。
         self.dl_state.update(type="starting", active=True, percent=None,
-                             path="", message="")
-        threading.Thread(target=self._download_worker, args=(url,), daemon=True).start()
+                             path="", message="", url=url, index=index)
+        threading.Thread(target=self._download_worker, args=(url, index), daemon=True).start()
         return {"ok": True}
 
     def get_download_state(self) -> dict:
@@ -989,16 +1112,21 @@ class Engine:
                 title = (rec.get("title") or "").strip()
                 if not title:
                     return ""
-                safe = re.sub(r'[\\/:*?"<>|]', "_", title)
+                vid = (rec.get("id") or "").strip()
+                # 预算必须**先给「 [id].%(ext)s」留够**，剩下的才给标题。
+                # 原先是 MAX_NAME_BYTES - 8，而「 [19 位 id].mp4」要 26 字节 ——
+                # 留少了，长标题时 [id] 会被截掉，连右括号都不剩（实测文件名卡在
+                # 204 字节，结尾是 `... @DOU+小助手 [7692598.mp4`）。
+                # [id] 是保证文件名唯一的那部分，丢了会让两个标题相近的视频重名，
+                # 后一个会被 yt-dlp 当成「已下载」直接跳过。
+                suffix = f" [{vid}].%(ext)s" if vid else ".%(ext)s"
+                budget = max(16, MAX_NAME_BYTES - len(suffix.encode("utf-8")))
+                # 标题超长时用和图片同一套规则：先丢末尾 #话题，再按字节裁加省略号
+                safe = self._clip_title(title, budget)
                 # 标题里若含 %，会被 yt-dlp 当模板再解析一次，转义成字面量
                 safe = safe.replace("%", "%%")
-                vid = (rec.get("id") or "").strip()
-                # 按字节留出余量：安卓文件名上限 255 字节，这里让标题只用 200，
-                # 剩下的留给「 [id].mp4」
-                budget = MAX_NAME_BYTES - 8
-                encoded = safe.encode("utf-8")
-                if len(encoded) > budget:
-                    safe = encoded[:budget].decode("utf-8", "ignore").strip()
+                if not safe:
+                    safe = vid or "douyin"
                 return f"{safe} [{vid}].%(ext)s" if vid else f"{safe}.%(ext)s"
         return ""
 
@@ -1018,9 +1146,212 @@ class Engine:
             self.dl_state.update(type="processing", active=True,
                                  percent=100.0, message="正在合并音视频…")
 
-    def _download_worker(self, url: str) -> None:
+    def _download_media_list(self, url: str, rec: dict, only_index: int = 0) -> None:
+        """图文 / 图集 / 实况图：逐张存进「作者名」的子目录。
+
+        与视频不同，这类内容没有可合流的音视频，就是一个地址列表 —— 直接用
+        urllib 取回即可，没必要也不该走 yt-dlp（yt-dlp 面对一条图片地址只会失败）。
+
+        命名规则（用户定的）：
+          目录 = 作者名；文件 = 标题_序号（实况图另有 **同名** 的 .mp4）。
+          目录同名不加编号，重名只在文件名上加 (1)(2)…
+
+        实况图那段「动」的视频必须和图片**同名**（`01.jpg` 配 `01.mp4`）：
+          实测过，系统相册是靠「同名的图片 + 视频」来配对的；只要名字对不上，
+          相册就当两张不相干的文件，哪怕内容、目录全都对。
+
+        [only_index]：0 = 全部；N = 只下第 N 张（用户滑到某一张后点「下载这张」）。
+        """
+        media = json.loads(rec.get("media_json") or "[]")
+        if not media:
+            self.dl_state.update(type="error", active=False, message="这条记录里没有图片地址")
+            return
+
+        items = list(enumerate(media, start=1))
+        if only_index > 0:
+            items = [(i, it) for i, it in items if i == only_index]
+            if not items:
+                self.dl_state.update(
+                    type="error", active=False,
+                    message=f"这条作品里没有第 {only_index} 张，可能内容已变化，重新解析一次。",
+                )
+                return
+
+        # 目录固定用作者名：同一个作者的作品都收在同一个目录里。
+        # 原先是重下就给目录加编号（「作者(1)」），用户反馈那不对 —— 他要的是
+        # **文件名**重名才加后缀，目录不该因为重下就多出来一份。
+        folder = os.path.join(self._output_dir, self._dir_name(rec))
+        os.makedirs(folder, exist_ok=True)
+        # 文件名前缀 = 标题（超长时保核心、按字节裁并加省略号）
+        prefix = self._clip_title(rec.get("title") or "", MAX_NAME_BYTES - 24)
+        stem = (prefix + "_") if prefix else ""
+        # 这一批文件名若已被占用，就整批加一个 (1)/(2)…，规矩和视频那边一致
+        dup = self._dup_index(folder, stem, items)
+        tag = f" ({dup})" if dup else ""
+
+        total = len(items)
+        done = 0
+        # Referer 按平台给：抖音的图片 CDN 会校验它，而推特那边不需要、
+        # 带上别人的 Referer 反而可能被 CDN 拒掉。
+        headers = {"User-Agent": _BROWSER_UA}
+        if rec.get("platform") == "抖音":
+            headers["Referer"] = "https://www.douyin.com/"
+        for i, item in items:
+            src = (item or {}).get("url") or ""
+            if not src:
+                continue
+            kind = (item or {}).get("kind") or "image"
+            ext = _ext_from_url(src, ".mp4" if kind == "video" else ".jpg")
+            try:
+                req = urllib.request.Request(src, headers=headers)
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    with open(os.path.join(folder, f"{stem}{i:02d}{tag}{ext}"), "wb") as f:
+                        shutil.copyfileobj(resp, f)
+            except Exception as exc:  # noqa: BLE001
+                # 单张失败不该让整条任务断掉：能下几张是几张，最后如实报数
+                print(f"[douyin] 第 {i} 张下载失败：{exc}")
+                continue
+
+            live = (item or {}).get("live") or ""
+            if live:
+                try:
+                    req = urllib.request.Request(live, headers=headers)
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        with open(os.path.join(folder, f"{stem}{i:02d}{tag}.mp4"), "wb") as f:
+                            shutil.copyfileobj(resp, f)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[douyin] 第 {i} 张的实况视频下载失败：{exc}")
+
+            done += 1
+            self.dl_state.update(
+                type="progress", active=True,
+                percent=round(done / total * 100, 1),
+                downloaded=done, total=total, speed=0, eta=None,
+            )
+
+        if done == 0:
+            self.dl_state.update(
+                type="error", active=False,
+                message="图片一张都没下下来，可能是直链已过期，重新解析一次再试。",
+            )
+            return
+
+        # 产物是一个目录：历史页据此提供「打开本地文件所在位置」
+        self.store.set_local_path(url, folder)
+        self.dl_state.update(type="done", active=False, path=folder,
+                             message="", percent=100.0)
+
+    @staticmethod
+    def _sanitize(raw: str) -> str:
+        """把一段文案变成能安全当文件名用的样子。
+
+        控制字符（标题里的换行、Tab 等）必须一并换掉：实测在 Android 的 FUSE 上，
+        目录名带换行时 mkdir 能成功，但往里写文件会直接 EPERM
+        （Operation not permitted），最后表现为「一张图都没下下来」。
+        """
+        return re.sub(r'[\x00-\x1f\x7f\\/:*?"<>|]+', "_", raw or "").strip(" ._")
+
+    @classmethod
+    def _dir_name(cls, rec: dict) -> str:
+        """产物目录名：用作者名。作者拿不到才退回标题 / id。"""
+        base = (
+            (rec.get("uploader") or "").strip()
+            or (rec.get("title") or "").strip()
+            or str(rec.get("id") or "douyin")
+        )
+        safe = cls._sanitize(base) or "douyin"
+        encoded = safe.encode("utf-8")
+        if len(encoded) > MAX_NAME_BYTES - 16:
+            safe = encoded[: MAX_NAME_BYTES - 16].decode("utf-8", "ignore").strip()
+        return safe
+
+    @classmethod
+    def _clip_title(cls, raw: str, budget: int) -> str:
+        """把标题裁到 budget 字节以内，尽量保住「核心标题」。
+
+        实测抖音的标题常常是「正文 + 一长串 #话题」，真正用来认内容的是前面的
+        正文，所以超长时先丢掉结尾那串话题标签；这样还不够才按字节硬裁，末尾用
+        省略号，让人一眼看出被裁过。真的整条都是正文（没有话题标签）时也一样：
+        尽量多留，留不下才裁。
+        """
+        s = cls._sanitize(raw)
+        if not s:
+            return ""
+        if len(s.encode("utf-8")) <= budget:
+            return s
+        trimmed = re.sub(r"(\s*#[^\s#]+)+\s*$", "", s).strip()
+        src = trimmed or s
+        if len(src.encode("utf-8")) <= budget:
+            return src
+        ell = "…"
+        room = max(1, budget - len(ell.encode("utf-8")))
+        cut = src.encode("utf-8")[:room].decode("utf-8", "ignore").strip()
+        return (cut or src[:1]) + ell
+
+    @staticmethod
+    def _dup_index(folder: str, stem: str, items) -> int:
+        """这一批文件名有没有被占用的；占了就返回下一个可用编号（0 = 不用加）。
+
+        按「整批」判断、而不是逐个文件各自决定 —— 否则同一批里会出现
+        「有的带 (1)、有的不带」，看着像出错了。规矩和视频那边一样：
+        重名只在扩展名前加编号，目录本身不动。
+        """
+        if not os.path.isdir(folder):
+            return 0
+        # 只比「不含扩展名」的名字：同一张图可能是 .jpg，也可能是 .webp
+        taken = {os.path.splitext(x)[0] for x in os.listdir(folder)}
+        for n in range(0, 100):
+            tag = f" ({n})" if n else ""
+            if not any(f"{stem}{i:02d}{tag}" in taken for i, _ in items):
+                return n
+        return 0
+
+    def _avoid_overwrite(self, opts: dict, target: str, template: str) -> str:
+        """同名文件已存在时，把模板改成带 `(1)/(2)…` 的版本，这次另存一份。
+
+        为什么要在外面做：yt-dlp 碰到同名文件是**直接跳过**（实测：对同一个视频
+        连点两次下载，文件时间戳和数量都不变），它没有「另存」开关。用户要的是
+        「不覆盖、每次留一份」，所以只能先问它「这次打算写哪个文件名」，冲突就换模板。
+
+        探测用的是 download=False，不写盘；拿到的 info 还能复用给候选名重算，
+        所以循环里不会再发网络请求。
+        """
+        probe = {k: v for k, v in opts.items() if k != "logger"}
+        probe["quiet"] = True
+        try:
+            with _YDL({**probe, "outtmpl": template}) as ydl:
+                info = ydl.extract_info(target, download=False) or {}
+                planned = ydl.prepare_filename(info)
+        except Exception:  # noqa: BLE001
+            # 探测失败不该影响正常下载：退回原模板，行为跟以前一致
+            return template
+
+        if not planned or not os.path.exists(planned):
+            return template
+
+        for n in range(1, 100):
+            cand_tmpl = _with_dup_suffix(template, n)
+            try:
+                with _YDL({**probe, "outtmpl": cand_tmpl}) as ydl:
+                    cand = ydl.prepare_filename(info)
+            except Exception:  # noqa: BLE001
+                return cand_tmpl
+            if not cand or not os.path.exists(cand):
+                print(f"[engine] 同名已存在，这次另存为：{os.path.basename(cand)}")
+                return cand_tmpl
+        return template
+
+    def _download_worker(self, url: str, index: int = 0) -> None:
         logger = _Logger()
         try:
+            # 图文 / 图集 / 实况图走单独路径
+            rec = next(
+                (r for r in self.store.all() if r.get("source_url") == url), None
+            )
+            if rec and rec.get("media_json") and rec.get("content_type") in ("images", "live"):
+                self._download_media_list(url, rec, index)
+                return
+
             target = self._download_target(url)
             opts = self._base_opts(target)
             dl = self.defaults.get("download") or {}
@@ -1043,6 +1374,10 @@ class Engine:
                 opts["http_headers"] = {"Referer": "https://www.douyin.com/"}
 
             opts["logger"] = logger
+
+            # 同名文件避让：yt-dlp 自己碰到同名会直接跳过（不重下、不覆盖），
+            # 用户要的是「另存一份」，所以这里先探一下文件名、冲突就把模板改成 (1)/(2)…
+            opts["outtmpl"] = self._avoid_overwrite(opts, target, template)
 
             with _YDL(opts) as ydl:
                 info = ydl.extract_info(target, download=True) or {}
@@ -1111,6 +1446,28 @@ class Engine:
             "resolved_at": int(time.time()),
             "play_kind": "progressive" if play_url else "none",
         }
+
+    def _with_local_path(self, rec: dict) -> dict:
+        """把历史库里已记录的产物路径补进解析结果。
+
+        解析结果原本不带 local_path —— 它来自 yt-dlp 的 info，而产物路径是下载
+        完成后才由我们自己记进历史的。于是「先下过某个视频、之后又解析同一条」时，
+        界面不知道文件已经存在，仍然提示「需下载后才能播放」（实测出来的 bug）。
+
+        这里按 id 优先、source_url 兜底去历史库找一次；文件已被用户删掉就忽略，
+        免得指向一个不存在的路径。
+        """
+        match = None
+        for old in self.store.all():
+            if rec.get("id") and old.get("id") == rec["id"]:
+                match = old
+                break
+            if match is None and old.get("source_url") == rec.get("source_url"):
+                match = old
+        path = ((match or {}).get("local_path") or "").strip()
+        if path and os.path.exists(path):
+            rec["local_path"] = path
+        return rec
 
     @staticmethod
     def _pick_playable_url(info: dict) -> str:
@@ -1213,8 +1570,8 @@ def parse_url(url: str) -> str:
     return json.dumps(_get().parse_url(url), ensure_ascii=False)
 
 
-def start_download(url: str) -> str:
-    return json.dumps(_get().start_download(url), ensure_ascii=False)
+def start_download(url: str, index: int = 0) -> str:
+    return json.dumps(_get().start_download(url, index), ensure_ascii=False)
 
 
 def get_download_state() -> str:

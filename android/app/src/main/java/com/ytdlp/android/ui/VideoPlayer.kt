@@ -1,5 +1,6 @@
 package com.ytdlp.android.ui
 
+import android.view.TextureView
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -7,6 +8,8 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.draw.alpha
 import androidx.media3.common.Player
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -20,14 +23,19 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -43,9 +51,12 @@ import androidx.media3.common.VideoSize
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.ytdlp.android.engine.Video
+import kotlinx.coroutines.launch
 
 /**
  * 播放区：默认显示封面 + 播放按钮，点了才换成真正的播放器。
@@ -118,7 +129,6 @@ fun PlayerBox(
                     video = video,
                     playable = source != null,
                     started = playing,
-                    isLocal = source != null && source.startsWith("/"),
                     onPlay = { playing = true },
                     modifier = Modifier.fillMaxSize().alpha(coverAlpha),
                 )
@@ -142,15 +152,14 @@ fun PlayerBox(
  * 封面层。
  *
  * @param playable 有没有可播源。没有就把原因写在封面上，别让用户对着封面点半天没反应。
- * @param started  是否已经点过播放。点过之后就只剩封面图本身 —— 播放按钮和
- *                 「在线播放」角标都该收起来，播放器接管画面。
+ * @param started  是否已经点过播放。点过之后就只剩封面图本身，播放按钮该收起来，
+ *                 播放器接管画面。
  */
 @Composable
 private fun CoverLayer(
     video: Video,
     playable: Boolean,
     started: Boolean,
-    isLocal: Boolean,
     onPlay: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -206,22 +215,6 @@ private fun CoverLayer(
                         contentDescription = "播放",
                         tint = Color.White,
                         modifier = Modifier.size(30.dp),
-                    )
-                }
-                // 标明播的是本地文件还是在线流：本地文件不受直链过期影响，
-                // 在线流隔一段时间可能就播不了了，用户有权知道区别
-                Box(
-                    Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(Dim.gapSm)
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(Color.Black.copy(alpha = 0.55f))
-                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                ) {
-                    androidx.compose.material3.Text(
-                        if (isLocal) "播放已下载的文件" else "在线播放",
-                        color = Color.White,
-                        fontSize = Font.tabBadge,
                     )
                 }
             }
@@ -316,6 +309,237 @@ private fun ExoPlayerView(
         modifier = modifier,
         onRelease = { view -> view.player = null },
     )
+}
+
+/**
+ * 图文 / 图集 / 实况图的浏览区。
+ *
+ * 为什么不用播放器：这类内容没有可播的视频流（实况图虽有一段动效，但主体是图），
+ * 逐张看图才是它本来的形态。
+ *
+ * 播放区高度沿用 PlayerBox 的做法（不超过屏高 40~45%）：竖屏图按真实比例摊开
+ * 会很高，把下方的下载按钮顶出屏幕。
+ *
+ * @param onPageChange 当前看到第几张（0 起）。底部要放「下载这张」，得知道是哪张。
+ */
+@Composable
+fun GalleryBox(
+    video: Video,
+    modifier: Modifier = Modifier,
+    onPageChange: (Int) -> Unit = {},
+) {
+    val media = video.mediaList
+    if (media.isEmpty()) {
+        Box(
+            modifier.fillMaxWidth().height(120.dp).clip(RoundedCornerShape(Dim.radiusSm))
+                .background(tone.surfaceHover),
+            contentAlignment = Alignment.Center,
+        ) {
+            androidx.compose.material3.Text("没有取到图片地址", fontSize = Font.hint, color = tone.textMuted)
+        }
+        return
+    }
+
+    val context = LocalContext.current
+    val pagerState = rememberPagerState(pageCount = { media.size })
+    val scope = rememberCoroutineScope()
+    val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+
+    // 换作品后把翻页位置退回第 1 张。rememberPagerState 会一直记着上一次的位置，
+    // 不重置的话新作品会停在旧页码上（比如解析完 26 张的图集再看 2 张的，
+    // 页码直接显示 2/2），底部「下载第 N 张」也会跟着下错。
+    LaunchedEffect(video.id) {
+        pagerState.scrollToPage(0)
+    }
+
+    // 把当前页报给外面。用 snapshotFlow 而不是直接读 currentPage：
+    // 后者在滑动过程中会变很多次，直接读会触发大量无谓重组。
+    LaunchedEffect(pagerState, media.size) {
+        snapshotFlow { pagerState.currentPage }.collect { onPageChange(it) }
+    }
+
+    BoxWithConstraints(modifier.fillMaxWidth()) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(screenHeight * 0.45f)
+                .clip(RoundedCornerShape(Dim.radiusSm))
+                .background(tone.surfaceHover)
+        ) {
+            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
+                val item = media[page]
+                if (item.kind == "video") {
+                    // X 的媒体列表里会混进视频（多视频 / 图文混排）。它没有静态图可垫，
+                    // 就直接播；同样只播当前页，翻走即释放，否则相邻几页会一起出声。
+                    if (page == pagerState.currentPage) {
+                        val vr = if (item.height > 0) item.width.toFloat() / item.height else 0f
+                        LiveMotion(item.url, vr, Modifier.fillMaxSize(), loop = false, controls = true)
+                    } else {
+                        Box(Modifier.fillMaxSize())
+                    }
+                } else {
+                    Box(Modifier.fillMaxSize()) {
+                        // 静态图先垫在底下：动效还没渲染出来时看得到画面，不会先黑一下
+                        AsyncImage(
+                            model = ImageRequest.Builder(context)
+                                .data(item.url)
+                                // 图片 CDN 会校验 Referer，不带会被拒（与下载链路一致）
+                                .addHeader("Referer", "https://www.douyin.com/")
+                                .crossfade(true)
+                                .build(),
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit,
+                        )
+                        // 实况图：这一张自带一段短视频，当前页就自动循环播它。
+                        // 只播当前页 —— 翻页时旧的播放器会随 key 变化被释放，
+                        // 否则相邻几张会同时出声。
+                        if (page == pagerState.currentPage && item.live.isNotBlank()) {
+                            val ratio = if (item.height > 0) item.width.toFloat() / item.height else 0f
+                            LiveMotion(item.live, ratio, Modifier.fillMaxSize())
+                        }
+                    }
+                }
+            }
+
+            // 左右箭头：光有页码，很多用户不知道这里可以滑动；给两个明确的按钮。
+            // 到两端时按钮变淡且不可点，让人一眼看出"到头了"。
+            if (media.size > 1) {
+                val canPrev = pagerState.currentPage > 0
+                val canNext = pagerState.currentPage < media.size - 1
+                PagerArrow(
+                    forward = false,
+                    enabled = canPrev,
+                    modifier = Modifier.align(Alignment.CenterStart).padding(start = 2.dp),
+                    onClick = {
+                        scope.launch { pagerState.animateScrollToPage(pagerState.currentPage - 1) }
+                    },
+                )
+                PagerArrow(
+                    forward = true,
+                    enabled = canNext,
+                    modifier = Modifier.align(Alignment.CenterEnd).padding(end = 2.dp),
+                    onClick = {
+                        scope.launch { pagerState.animateScrollToPage(pagerState.currentPage + 1) }
+                    },
+                )
+            }
+
+            // 页码：一屏只能看一张，没有它用户不知道还有多少
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(Dim.gapSm)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+            ) {
+                androidx.compose.material3.Text(
+                    "${pagerState.currentPage + 1}/${media.size}" +
+                        if (video.contentType == "live") " · 实况" else "",
+                    color = Color.White,
+                    fontSize = Font.tabBadge,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 短视频播放块。两种用途：
+ *   1. 实况图的那段「动效」—— 循环、无控件、没画面时透出底下的静态图（loop=true）
+ *   2. X 媒体列表里的视频项 —— 不循环、带播放控件（controls=true）
+ *
+ * 抖音把实况图拆成两样存在服务端：一张静态图 + 一段短视频。那段短视频自带音轨，
+ * 也就是你在抖音里听到的「这张图自己的声音」。
+ *
+ * 为什么默认用 TextureView 而不是 PlayerView 的 SurfaceView：SurfaceView 在画面
+ * 渲染出来之前是一块不透明的黑，每翻一页都先黑闪一下；TextureView 没画面时是透明的，
+ * 底下垫着的静态图就露出来了。需要播放控件时才换回 PlayerView（TextureView 没有现成控件）。
+ *
+ * @param ratio 视频宽高比。和静态图一样按 fit 居中，两者位置才能严丝合缝地重合。
+ */
+@Composable
+private fun LiveMotion(
+    url: String,
+    ratio: Float,
+    modifier: Modifier = Modifier,
+    loop: Boolean = true,
+    controls: Boolean = false,
+) {
+    val context = LocalContext.current
+    val player = remember(url) {
+        ExoPlayer.Builder(context).build().apply {
+            // 抖音的视频 CDN 会校验 Referer；推特的不用，带上别的站点的 Referer 反而可能被拒
+            if (url.contains("douyinvod.com")) {
+                val factory = DefaultHttpDataSource.Factory()
+                    .setDefaultRequestProperties(mapOf("Referer" to "https://www.douyin.com/"))
+                setMediaSource(
+                    ProgressiveMediaSource.Factory(factory)
+                        .createMediaSource(MediaItem.fromUri(url))
+                )
+            } else {
+                setMediaItem(MediaItem.fromUri(url))
+            }
+            // 实况图那段动效只有几秒，循环播放；X 的视频是一次性内容，播完就停
+            repeatMode = if (loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+            playWhenReady = true
+            prepare()
+        }
+    }
+    DisposableEffect(player) {
+        onDispose { player.release() }
+    }
+
+    val inner = Modifier.aspectRatio(if (ratio > 0f) ratio else 16f / 9f)
+    Box(modifier, contentAlignment = Alignment.Center) {
+        if (controls) {
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        this.player = player
+                        useController = true
+                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    }
+                },
+                modifier = inner,
+                onRelease = { view -> view.player = null },
+            )
+        } else {
+            AndroidView(
+                factory = { ctx -> TextureView(ctx).also { tv -> player.setVideoTextureView(tv) } },
+                modifier = inner,
+                onRelease = { tv -> player.clearVideoTextureView(tv) },
+            )
+        }
+    }
+}
+
+/** 图集左右两侧的翻页箭头。尺寸刻意做小（32dp），少挡画面。 */
+@Composable
+private fun PagerArrow(
+    forward: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier
+            .size(32.dp)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = if (enabled) 0.42f else 0.12f))
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            if (forward) Icons.Default.KeyboardArrowRight else Icons.Default.KeyboardArrowLeft,
+            contentDescription = if (forward) "下一张" else "上一张",
+            tint = Color.White,
+            modifier = Modifier.size(22.dp),
+        )
+    }
 }
 
 /**

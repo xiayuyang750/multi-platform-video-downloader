@@ -3,9 +3,13 @@ package com.ytdlp.android.ui
 import android.app.Application
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
+import android.media.MediaScannerConnection
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ytdlp.android.BuildConfig
@@ -25,6 +29,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicInteger
+import java.io.File
 
 /** 解析页的状态。各态互斥，用 sealed 比「一个 result + 一堆 bool」更难写错。 */
 sealed interface ParseUi {
@@ -108,6 +114,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // 若把 _needStoragePermission 写在文件末尾，init 执行时它还是 null，
     // 会抛 "Attempt to invoke ... setValue on a null object reference"。
     private var parseJob: Job? = null
+
+    /**
+     * 已经通知过相册收录的那次「完成」（用 Download.seq 标识）。
+     *
+     * 不能靠「上一轮还 active、这一轮变 done」来判断完成 —— 短任务（如实况图只有
+     * 一张图）在两次轮询之间就跑完了，界面从未见过 active=true，扫描就被整段跳过，
+     * 结果就是文件明明下好了、相册里却没有（实测：图集能进相册，实况图不能）。
+     * 改看 seq：只要是没见过的新 seq 且已完成，就收录一次。
+     */
+    private var scannedSeq: Long = -1L
+
+    /**
+     * 用户点掉过的下载条对应的 seq。
+     *
+     * 下载状态是常驻的，轮询会把同一条 done 反复读回来；不记这一笔，用户点掉
+     * 提示条后过一两秒它又会冒出来（实测到的问题）。
+     */
+    private var dismissedSeq: Long = -1L
 
     init {
         // 先把 Python 起来，免得用户点「解析」时先白等 1 秒
@@ -236,11 +260,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         startDownload(video)
     }
 
-    /** 从历史页也能直接发起下载，所以按 Video 重载一份。 */
-    fun startDownload(video: Video) {
+    /**
+     * 发起下载。
+     *
+     * @param index 只对图文/图集有意义：0 = 全部，N = 只下第 N 张。
+     */
+    fun startDownload(video: Video, index: Int = 0) {
         viewModelScope.launch {
             val error = withContext(Dispatchers.IO) {
-                runCatching { Engine.startDownload(ctx, video.sourceUrl) }
+                runCatching { Engine.startDownload(ctx, video.sourceUrl, index) }
                     .getOrElse { "引擎异常：${it.message}" }
             }
             if (error != null) {
@@ -268,12 +296,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     runCatching { Engine.downloadState(ctx) }.getOrNull()
                 }
                 if (state != null) {
-                    val prev = _download.value
-                    _download.value = state
-                    // 刚下载完 -> 把「保存到哪」告诉设置页不必了，
-                    // 下载条自己会显示路径
-                    if (prev.active && !state.active && state.isDone) {
+                    // 用户点掉过的那条状态（或更早的）不再显示；常驻的 done 被
+                    // 反复读回来也不该让提示条复活。
+                    if (state.seq > dismissedSeq) {
+                        _download.value = state
+                    }
+                    // 新的「完成」→ 通知相册收录一次（详见 scannedSeq 的说明）
+                    if (state.isDone && state.seq != scannedSeq) {
+                        scannedSeq = state.seq
                         refreshHistory()
+                        notifyMediaScanner(state.path)
                     }
                 }
                 delay(if (_download.value.active) 700 else 2000)
@@ -281,9 +313,96 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 用户点掉下载条。 */
+    /** 用户点掉下载条。记下 seq：否则轮询会把常驻的同一条状态又显示回来。 */
     fun dismissDownload() {
+        dismissedSeq = _download.value.seq
         _download.value = _download.value.copy(type = "idle", active = false)
+    }
+
+    /**
+     * 下载完成后通知系统媒体扫描器收录这个文件。
+     *
+     * 为什么必须有这一步：yt-dlp 是拿普通文件 API 直接写盘的，系统并不知道
+     * 多了一个媒体文件 —— MediaStore 不会自动收录。结果就是文件明明在
+     * 「下载」目录里、应用内也能播，但相册/图库（以及依赖 MediaStore 的应用）
+     * 看不到它。实测发现的症状是「有的能看见、有的看不见」：能不能被收录
+     * 取决于是否有别的事件（重启、挂载、别的应用扫描）碰巧触发了扫描。
+     *
+     * scanFile 只是发起一次扫描请求，是异步的且不阻塞；失败（比如文件落在
+     * 应用私有目录、系统没权限扫）也只是不收录，不影响下载本身。
+     */
+    private fun notifyMediaScanner(path: String) {
+        if (path.isBlank()) return
+        runCatching {
+            val f = File(path)
+            // 图文类的产物是一个目录：要把里面的每一张都收录进去，
+            // scanFile 对目录本身不起作用。
+            val targets = if (f.isDirectory) {
+                (f.listFiles() ?: emptyArray()).filter { it.isFile }.map { it.absolutePath }
+            } else {
+                listOf(path)
+            }
+            if (targets.isEmpty()) return
+            // 扫完（每个文件回调一次）再登记实况图：登记要改 MediaStore 里的记录，
+            // 而记录是扫描之后才存在的，所以必须等它扫完。
+            val left = AtomicInteger(targets.size)
+            MediaScannerConnection.scanFile(ctx, targets.toTypedArray(), null) { _, _ ->
+                if (left.decrementAndGet() == 0 && f.isDirectory) markLivePhotos(f)
+            }
+        }
+    }
+
+    /**
+     * 把目录里「同名的图片 + 视频」登记成系统相册的**动态照片（实况图）**。
+     *
+     * 为什么光有同名文件还不够：实测（vivo）发现，相册读的是 MediaStore 里一个
+     * 厂商私有字段 `live_photo`，而且**图片记录和视频记录两边都要有值**才算数 ——
+     * 只写一边，相册照样显示成普通图片。抖音下载的实况图就是这么做的
+     * （它的图片和视频两条记录里都带着这个字段）。
+     *
+     * 这个字段名是厂商私有的，换品牌未必叫这个，所以整段是「能写就写」：
+     * 写不上就安静跳过 —— 文件本身该在还在，不影响任何别的功能。
+     */
+    private fun markLivePhotos(dir: File) {
+        runCatching {
+            val stamp = "${System.currentTimeMillis()}000000000000000"
+            dir.listFiles()
+                ?.filter { it.isFile && it.extension.lowercase() == "jpg" }
+                ?.forEach { jpg ->
+                    val mp4 = File(dir, jpg.nameWithoutExtension + ".mp4")
+                    if (!mp4.exists()) return@forEach
+                    val jpgId = mediaId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, jpg)
+                        ?: return@forEach
+                    val mp4Id = mediaId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, mp4)
+                        ?: return@forEach
+                    putLivePhoto(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, jpgId, stamp)
+                    putLivePhoto(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, mp4Id, stamp)
+                }
+        }
+    }
+
+    /** 按文件路径查出它在 MediaStore 里的 _id。查不到（还没扫进来）返回 null。 */
+    private fun mediaId(collection: Uri, file: File): Long? {
+        ctx.contentResolver.query(
+            collection,
+            arrayOf(MediaStore.MediaColumns._ID),
+            "${MediaStore.MediaColumns.DATA} = ?",
+            arrayOf(file.absolutePath),
+            null,
+        )?.use { c ->
+            if (c.moveToFirst()) return c.getLong(0)
+        }
+        return null
+    }
+
+    private fun putLivePhoto(collection: Uri, id: Long, stamp: String) {
+        val values = ContentValues().apply { put("live_photo", stamp) }
+        ctx.contentResolver.update(
+            collection,
+            values,
+            "${MediaStore.MediaColumns._ID} = ?",
+            arrayOf(id.toString()),
+        )
     }
 
     // ---- 历史 ----

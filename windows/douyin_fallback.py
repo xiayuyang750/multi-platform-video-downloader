@@ -1,26 +1,35 @@
 # -*- coding: utf-8 -*-
-"""抖音备用解析链路：驱动真实浏览器，监听接口响应拿无水印直链。
+"""抖音解析链路：优先调公开接口，失败才驱动真实浏览器。
 
-为什么必须单独做一条：
-    yt-dlp 用 HTTP 客户端直连抖音接口，需要 a_bogus 签名和登录态，两样都拿不到，
-    所以必然失败（报错是 403 / "Fresh cookies are needed"）。而真实浏览器会自动
-    完成这两件事 —— 我们只要监听它自己发出的 aweme/detail 响应即可。
-    这是"搭便车"，不需要逆向签名算法，因此比自行实现签名更耐用。
+两条路：
+  1. resolve_via_api()（主）—— 纯 HTTP 调 aweme.snssdk.com 的公开接口，把 UA
+     伪装成抖音 App 自身。不需要签名、不需要登录，秒回。与安卓端
+     ytdlp_engine._parse_douyin_via_api 同构，改一处要同步另一处。
+  2. resolve()（兜底）—— 驱动真实浏览器，监听它自己发出的 aweme/detail 响应，
+     不需要逆向签名算法（"搭便车"）。接口哪天被关掉时顶上。
 
-代价与边界：
+为什么 yt-dlp 走不通、要单独做：
+    yt-dlp 用 HTTP 客户端直连抖音，需要 a_bogus 签名和登录态，两样都拿不到，
+    所以必然失败（报错是 403 / "Fresh cookies are needed"）。
+
+浏览器那条的代价与边界：
     - 会弹出一个浏览器窗口（不弹窗就得 headless，而 headless 更容易被检测，
       正好抵消它最大的优势，所以选择可见窗口）
-    - 比 yt-dlp 慢（数秒到十几秒）
+    - 比接口方式慢（数秒到十几秒）
     - 只对抖音有效，无法推广到其他平台
-    因此它只作为兜底：yt-dlp 失败时才启用。
 """
 
 from __future__ import annotations
 
 import atexit
+import json
 import os
+import re
 import shutil
+import socket
 import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 # 浏览器数据目录：放在用户数据区，而不是项目目录里。
@@ -52,7 +61,119 @@ DETAIL_API = "aweme/detail/"
 
 
 class DouyinFallbackError(RuntimeError):
-    """备用链路不可用（缺浏览器、缺依赖、或取不到数据）。"""
+    """解析链路不可用（接口失败、缺浏览器、缺依赖、或取不到数据）。"""
+
+
+# ==================== 公开接口方案（主路径）====================
+# 这条接口的来源：对比一个能稳定解析抖音的参考实现，从它的 dex 里提取字符串后
+# 发现的。它不需要 a_bogus 签名、不需要登录态，直连即 200 —— 只需把 UA 伪装成
+# 抖音 App 自身。以下三个常量与安卓端 ytdlp_engine.py 保持一致，改一处要同步另一处。
+DOUYIN_APP_UA = (
+    "com.ss.android.ugc.aweme/260201 (Linux; U; Android 12; zh_CN; Pixel 4; "
+    "Build/SP1A.210812.016; Cronet/TTNetVersion)"
+)
+FEED_API = "https://aweme.snssdk.com/aweme/v1/feed/?aweme_id={id}"
+
+# 展开分享短链时用的普通浏览器 UA
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+def video_id(url: str) -> str:
+    """从抖音分享链接里取出作品 ID。
+
+    两种形态都要支持：
+      - 长链 https://www.douyin.com/video/7689396203758521646 → 直接正则
+      - 短链 https://v.douyin.com/XiRYwhL6CnQ/                → 先跟随跳转
+    """
+    text = url or ""
+    m = (
+        re.search(r"/(?:video|note)/(\d{10,25})", text)
+        or re.search(r"modal_id=(\d{10,25})", text)
+    )
+    if m:
+        return m.group(1)
+
+    # 短链要跟随一次跳转才能看到真实地址（实测 302 到 www.douyin.com/video/<id>）
+    if "v.douyin.com" in text or "iesdouyin.com" in text:
+        try:
+            req = urllib.request.Request(text, headers={"User-Agent": _BROWSER_UA})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                final = resp.geturl()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[douyin] 展开短链失败：{exc}")
+            return ""
+        m = re.search(r"/(?:video|note)/(\d{10,25})", final or "")
+        if m:
+            return m.group(1)
+    return ""
+
+
+def resolve_via_api(share_url: str, timeout: int = 20) -> dict:
+    """调抖音公开接口拿无水印直链。
+
+    返回的键与 resolve() 对齐，便于复用同一套入库与界面逻辑。
+    失败时抛 DouyinFallbackError。
+    """
+    vid = video_id(share_url)
+    if not vid:
+        raise DouyinFallbackError("没能从链接里识别出作品编号")
+
+    request = urllib.request.Request(
+        FEED_API.format(id=vid), headers={"User-Agent": DOUYIN_APP_UA}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        raise DouyinFallbackError(f"接口返回 HTTP {exc.code}") from exc
+    except (socket.timeout, TimeoutError) as exc:
+        raise DouyinFallbackError("连接抖音接口超时，请检查网络。") from exc
+    except urllib.error.URLError as exc:
+        raise DouyinFallbackError(f"连不上抖音接口：{exc.reason}") from exc
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise DouyinFallbackError("接口返回的内容无法识别，可能已改版。") from exc
+
+    items = body.get("aweme_list") or []
+    if not items:
+        raise DouyinFallbackError("接口没有返回作品数据（可能作品已删除或设为私享）")
+
+    # 这个接口是「推荐流」性质的：只有**视频**会被原样带回，图文/图集/实况图
+    # 这类「笔记」它不服务 —— 此时 items 里全是推荐作品，目标 id 不在其中。
+    #
+    # 绝不能退回 items[0]：实测 7 条不同的图集/实况图链接会拿到**同一条无关视频**，
+    # 而界面显示「解析成功」，用户会把别人的视频当成自己的内容下走（伪成功）。
+    # 取不到就明确失败，交给上层降级到浏览器模式。与安卓端同构，改一处要同步另一处。
+    target = next(
+        (x for x in items if str(x.get("aweme_id") or "") == vid),
+        None,
+    )
+    if target is None:
+        raise DouyinFallbackError(
+            f"接口返回的 {len(items)} 条里没有这条作品（疑似图文/图集类内容），转浏览器模式"
+        )
+
+    video = target.get("video") or {}
+    play_url, download_url = _pick_tiers(video)
+    if not play_url:
+        raise DouyinFallbackError("接口返回里没有可用的视频地址")
+
+    author = target.get("author") or {}
+    cover = ((video.get("cover") or {}).get("url_list") or [""])[0]
+    duration_ms = video.get("duration") or 0
+
+    return {
+        "id": str(target.get("aweme_id") or vid),
+        "title": target.get("desc") or "",
+        "uploader": author.get("nickname") or "",
+        "uploader_id": author.get("unique_id") or author.get("short_id") or "",
+        "duration": int(duration_ms // 1000) if duration_ms else None,
+        "thumbnail": cover or "",
+        "play_url": play_url,
+        "download_url": download_url,
+    }
 
 
 _lock = threading.Lock()

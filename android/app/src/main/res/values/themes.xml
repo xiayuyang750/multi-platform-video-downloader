@@ -1,4 +1,22 @@
 <resources>
     <!-- 先用系统自带主题，不引入任何第三方依赖，方便验证构建链路本身是否通 -->
     <style name="Theme.Ytdlp" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <!-- 抖音「浏览器模式」解析页专用：整页透明，用户完全看不到它。
+
+         为什么：这个 Activity 存在的唯一理由是 WebView 需要一个宿主窗口，
+         用户没有任何理由看到它。之前是一整页白屏 + 一行状态文字，等于把
+         「正在解析」从原界面搬到一个空页面上，观感更像卡住了。透明之后，
+         用户就一直停在解析页看转圈，解析完直接出结果。
+
+         几个都不能省：
+         - windowIsTranslucent + 透明背景：否则会露出白底
+         - windowAnimationStyle=@null：不然还会闪一下切页动画，照样有「跳走」的感觉
+         - backgroundDimEnabled=false：不加会把底下的界面压暗一层 -->
+    <style name="Theme.Ytdlp.Transparent" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
 </resources>

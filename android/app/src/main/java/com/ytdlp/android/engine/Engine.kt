@@ -119,12 +119,17 @@ object Engine {
 
     // ---- 下载 ----
 
-    /** 发起下载。返回错误说明（null 表示已受理）。
+    /**
+     * 发起下载。返回错误说明（null 表示已受理）。
      *
      * 注意「已受理」不等于「下载成功」：真正的结果要靠 downloadState() 轮询。
+     *
+     * @param index 只对图文/图集有意义：0 = 全部，N = 只下第 N 张。
      */
-    fun startDownload(context: Context, url: String): String? {
-        val obj = JSONObject(module(context).callAttr("start_download", url).toString())
+    fun startDownload(context: Context, url: String, index: Int = 0): String? {
+        val obj = JSONObject(
+            module(context).callAttr("start_download", url, index).toString()
+        )
         return if (obj.optBoolean("ok")) null else obj.optString("error")
     }
 
@@ -204,7 +209,38 @@ data class Video(
     val filesize: String = "",
     /** 非空表示走的是备用链路（抖音浏览器模式 / X 第三方服务） */
     val via: String = "",
+    /** 内容类型：video（普通视频）/ images（图文·图集）/ live（实况图） */
+    val contentType: String = "video",
+    /** 图文类的媒体列表（存的是 JSON 文本，用 mediaList 取解析结果） */
+    val mediaJson: String = "",
 ) {
+    /** 图文 / 图集 / 实况图：播放器用不上，界面上走图片浏览 */
+    val isGallery: Boolean get() = contentType == "images" || contentType == "live"
+    /**
+     * 解析后的媒体列表。
+     *
+     * 存 JSON 文本而不是直接存对象，是因为这个类既要从 Python 传回的 JSON 构造，
+     * 又要写回历史库 —— 一路都是字符串最省事，只在要展示时才解析这一次。
+     */
+    val mediaList: List<Media> by lazy {
+        if (mediaJson.isBlank()) return@lazy emptyList()
+        runCatching {
+            val arr = JSONArray(mediaJson)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val u = o.optString("url")
+                if (u.isBlank()) return@mapNotNull null
+                Media(
+                    url = u,
+                    width = o.optInt("width"),
+                    height = o.optInt("height"),
+                    live = o.optString("live"),
+                    // X 的媒体列表里可能混着视频，得靠它区分「翻页看图」还是「播放这段」
+                    kind = o.optString("kind").ifBlank { "image" },
+                )
+            }
+        }.getOrElse { emptyList() }
+    }
     /** 有没有可以直连播放的在线地址。空的话界面要说明为什么播不了。 */
     val playable: Boolean get() = resolvedUrl.isNotBlank() && playKind == "progressive"
 
@@ -223,6 +259,8 @@ data class Video(
      * 而本地文件一直在。 */
     val playSource: String?
         get() = when {
+            // 图文类的产物是个目录、也没有在线视频流，播放器无从下手
+            isGallery -> null
             hasLocalFile -> localPath
             playable -> resolvedUrl
             else -> null
@@ -242,9 +280,15 @@ data class Video(
             downloadUrl = o.optString("download_url"),
             resolvedAt = o.optLong("resolved_at"),
             playKind = o.optString("play_kind"),
+            // 解析结果也会带 local_path：先下载过、之后又解析同一条时，
+            // 引擎会从历史库把它补回来，这样播放区直接播本地文件，
+            // 而不是又提示「需下载后才能播放」。
+            localPath = o.optString("local_path"),
             quality = o.optString("quality"),
             filesize = o.optString("filesize"),
             via = o.optString("via"),
+            contentType = o.optString("content_type").ifBlank { "video" },
+            mediaJson = o.optString("media_json"),
         )
 
         fun fromRow(o: JSONObject) = Video(
@@ -261,9 +305,28 @@ data class Video(
             resolvedAt = o.optLong("resolved_at"),
             playKind = o.optString("play_kind"),
             localPath = o.optString("local_path"),
+            contentType = o.optString("content_type").ifBlank { "video" },
+            mediaJson = o.optString("media_json"),
         )
     }
 }
+
+/** 图文类作品里的一条媒体。 */
+data class Media(
+    val url: String,
+    val width: Int = 0,
+    val height: Int = 0,
+    /** 实况图的「动」那一段视频地址；普通图集为空串 */
+    val live: String = "",
+    /**
+     * "image" 或 "video"。
+     *
+     * 抖音的图文/图集/实况图都是图片（视频在 live 里），但 X 的一条推文可能
+     * 既有多张图又有多个视频 —— 那些视频项要靠这个字段才能被正确播放，
+     * 而不是拿去当图片解码。
+     */
+    val kind: String = "image",
+)
 
 /** 下载状态快照。type 取值：idle / starting / progress / processing / done / error */
 data class Download(
@@ -276,6 +339,26 @@ data class Download(
     val total: Long,
     val speed: Double,
     val eta: Int?,
+    /**
+     * 这条状态属于哪个视频（原链接）。
+     *
+     * 下载状态是全局的 —— 同一时刻只有一个任务，且完成后的状态会一直留到
+     * 下一条任务开始。界面要拿产物路径去播放时，必须靠这个字段确认
+     * 「产物确实属于当前这条视频」，否则会把上一次下载的文件播出来。
+     */
+    val url: String = "",
+    /**
+     * Python 侧每次 update 自增的序号。
+     *
+     * 下载状态是**常驻**的：一条任务完成后，"done" 会一直留在快照里，直到下一条
+     * 任务开始。界面必须能分清「这是刚发生的一次完成」还是「早就完成、我只是
+     * 又读到一遍」—— 否则会踩两个坑（都实测过）：
+     *   1. 用户点掉底部的完成提示条，轮询又把同一个 done 读回来 → 提示条又冒出来；
+     *   2. 短任务（如实况图只有 1 张图）两次轮询之间就跑完了，界面从头到尾
+     *      没看见过 active=true，于是"完成时通知相册收录"这步被跳过 → 相册里没有。
+     * 靠 seq 变化来判定"新的一次完成"，两个问题一起解决。
+     */
+    val seq: Long = 0L,
 ) {
     val isError: Boolean get() = type == "error"
     val isDone: Boolean get() = type == "done"
@@ -294,6 +377,8 @@ data class Download(
             total = o.optLong("total"),
             speed = o.optDouble("speed", 0.0),
             eta = o.optIntOrNull("eta"),
+            url = o.optString("url"),
+            seq = o.optLong("seq"),
         )
     }
 }

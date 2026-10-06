@@ -261,7 +261,8 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
             }
 
             is ParseUi.NeedBrowser -> {
-                // 抖音要走浏览器模式：立刻拉起那个 WebView 页面。
+                // 抖音这类需要走内置浏览器的内容：在后台拉起那个（用户看不到的）
+                // 窗口去取数据，界面上就停在这里转圈，取到后直接换成结果卡片。
                 // 用 url 做 key，避免重组时反复拉起。
                 LaunchedEffect(state.url) {
                     douyinLauncher.launch(DouyinActivity.intent(context, state.url))
@@ -276,13 +277,10 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                             strokeWidth = 2.dp,
                             color = tone.accent,
                         )
-                        Text("正在打开浏览器模式…", fontSize = Font.body, color = tone.textMuted)
+                        Text("正在解析该视频…", fontSize = Font.body, color = tone.textMuted)
                     }
                     Spacer12()
-                    Hint(
-                        "抖音的接口需要签名和登录态，纯 HTTP 拿不到，所以改用内置浏览器解析。\n" +
-                            "如果页面提示登录，登录后稍等几秒即可。登录状态会保留，下次不用再登。"
-                    )
+                    Hint("这条内容需要多等几秒，请稍候。")
                 }
             }
 
@@ -300,6 +298,7 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                         video = state.video,
                         download = download,
                         onDownload = vm::startDownload,
+                        onDownloadPage = { index -> vm.startDownload(state.video, index) },
                         onCopy = { vm.copyText(state.video.sourceUrl) },
                         onOpenSource = { uriHandler.openUriSafe(state.video.sourceUrl) },
                     )
@@ -314,9 +313,12 @@ private fun ResultCard(
     video: com.ytdlp.android.engine.Video,
     download: com.ytdlp.android.engine.Download,
     onDownload: () -> Unit,
+    onDownloadPage: (Int) -> Unit,
     onCopy: () -> Unit,
     onOpenSource: () -> Unit,
 ) {
+    // 图集当前看到第几张（0 起）。「下载这张」要下的是它。
+    var page by remember(video.id) { mutableStateOf(0) }
     Card {
         // 平台 + 作者一行
         Row(
@@ -366,24 +368,54 @@ private fun ResultCard(
 
         Spacer(Modifier.height(Dim.gapLg))
 
-        // 封面 + 播放器。下载完成后直接用产物文件播放 —— 对 B站/YouTube
-        // 这类纯 DASH 站点，在线直链根本不存在，本地文件是唯一能看的方式。
-        val justDownloaded = download.path.takeIf { download.isDone && it.isNotBlank() }
-        PlayerBox(video, source = justDownloaded ?: video.playSource)
+        if (video.isGallery) {
+            // 图文 / 图集 / 实况图：逐张浏览，播放器在这里没有意义
+            GalleryBox(video, onPageChange = { page = it })
+        } else {
+            // 封面 + 播放器。刚下载完这一条时直接播产物文件 —— 对 B站/YouTube
+            // 这类纯 DASH 站点，在线直链根本不存在，本地文件是唯一能看的方式。
+            //
+            // 必须比对 download.url：download 是全局状态（同一时刻只有一个任务，
+            // 完成后的状态会一直留着）。不比对就会出现这个实测到的 bug ——
+            // 下完 A 再去解析 B，B 的播放区会拿 A 的产物文件来播。
+            val justDownloaded = download.path.takeIf {
+                download.isDone && it.isNotBlank() && download.url == video.sourceUrl
+            }
+            PlayerBox(video, source = justDownloaded ?: video.playSource)
+        }
 
         Spacer(Modifier.height(Dim.gapLg))
 
         Row(horizontalArrangement = Arrangement.spacedBy(Dim.gap)) {
             PrimaryButton(
-                text = if (download.active) "下载中…" else "下载",
+                text = if (download.active) "下载中…" else if (video.isGallery) "下载全部" else "下载",
                 onClick = onDownload,
                 enabled = !download.active,
                 modifier = Modifier.weight(1f),
             )
+            // 图集才给「下载这张」：视频没有"第几张"的概念
+            if (video.isGallery) {
+                GhostButton(
+                    text = "下载第 ${page + 1} 张",
+                    onClick = { onDownloadPage(page + 1) },
+                    enabled = !download.active,
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
+                GhostButton(
+                    text = "复制链接",
+                    onClick = onCopy,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+
+        if (video.isGallery) {
+            Spacer(Modifier.height(Dim.gap))
             GhostButton(
                 text = "复制链接",
                 onClick = onCopy,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.fillMaxWidth(),
             )
         }
 

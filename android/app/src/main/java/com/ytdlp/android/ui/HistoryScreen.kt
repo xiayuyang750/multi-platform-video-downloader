@@ -177,6 +177,7 @@ fun HistoryScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                         onCopy = { vm.copyText(video.sourceUrl) },
                         onReanalyze = { vm.reanalyze(video) },
                         onDownload = { vm.startDownload(video) },
+                        onDownloadPage = { index -> vm.startDownload(video, index) },
                         onOpenSource = { uriHandler.openUriSafe(video.sourceUrl) },
                         onDelete = { vm.deleteHistory(video) },
                     )
@@ -255,9 +256,12 @@ private fun HistoryItem(
     onCopy: () -> Unit,
     onReanalyze: () -> Unit,
     onDownload: () -> Unit,
+    onDownloadPage: (Int) -> Unit,
     onOpenSource: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    // 图集当前看到第几张（0 起）
+    var page by remember(video.id) { mutableStateOf(0) }
     Column(
         Modifier
             .fillMaxWidth()
@@ -310,23 +314,45 @@ private fun HistoryItem(
                     if (video.hasLocalFile) DetailLine("本地文件", "已下载")
                 }
 
-                PlayerBox(video)
-                if (video.playSource == null) {
-                    Hint(
-                        "该站点解析出的是音视频分离的流（B站、YouTube 等都已全面 DASH 化），" +
-                            "没有可直连播放的地址。下载后这里就能直接播放本地文件。"
-                    )
+                // 图文 / 图集 / 实况图和解析页一样：逐张翻页浏览，不是播放器。
+                if (video.isGallery) {
+                    GalleryBox(video, onPageChange = { page = it })
+                } else {
+                    PlayerBox(video)
+                    if (video.playSource == null) {
+                        Hint(
+                            "该站点解析出的是音视频分离的流（B站、YouTube 等都已全面 DASH 化），" +
+                                "没有可直连播放的地址。下载后这里就能直接播放本地文件。"
+                        )
+                    }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(Dim.gap)) {
                     PrimaryButton(
-                        text = "下载",
+                        text = if (video.isGallery) "下载全部" else "下载",
                         onClick = onDownload,
                         modifier = Modifier.weight(1f),
                     )
+                    if (video.isGallery) {
+                        // 和解析页一致：滑到哪张就能单独下哪张
+                        GhostButton(
+                            text = "下载第 ${page + 1} 张",
+                            onClick = { onDownloadPage(page + 1) },
+                            modifier = Modifier.weight(1f),
+                        )
+                    } else {
+                        GhostButton(
+                            text = "打开原视频",
+                            onClick = onOpenSource,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                if (video.isGallery) {
+                    Spacer(Modifier.height(Dim.gap))
                     GhostButton(
                         text = "打开原视频",
                         onClick = onOpenSource,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
             }

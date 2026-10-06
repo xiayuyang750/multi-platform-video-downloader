@@ -31,8 +31,11 @@ PARSE_TIMEOUT = 75
 PROGRESS_MARK = "__PROG__"
 DONE_MARK = "__DONE__"
 
-# 备用链路拿到的是裸直链（没有元数据），下载命令要据此改用「库里标题」拼文件名
-DIRECT_URL_HOSTS = ("douyinvod.com", "video.twimg.com")
+# 直链拿到的是裸地址（没有元数据），下载命令要据此改用「库里标题」拼文件名。
+# 抖音这几个域名是实测出来的：采样 160 条直链，全部落在 365yg.com / amemv.com 上，
+# 一条 douyinvod.com 都没有 —— 只认 douyinvod.com 会让文件名退化成 URL 片段。
+# 与安卓端 ytdlp_engine.DIRECT_URL_HOSTS 对应，改一处要同步另一处。
+DIRECT_URL_HOSTS = ("douyinvod.com", "365yg.com", "amemv.com", "video.twimg.com")
 
 PLATFORM_RULES = [
     ("YouTube", r"(^|//)([a-z0-9-]+\.)*youtu\.?be"),
@@ -104,6 +107,28 @@ ERROR_HINTS = [
     (
         "timed out",
         "网络超时。境外站点（YouTube / Instagram / X）需要开着 VPN 才能访问。",
+    ),
+    # ---- 下面两条是网络层失败。与安卓端 ytdlp_engine.ERROR_HINTS 对应，
+    #      改一处要同步另一处（两端是同一份规格的两个实现）----
+    (
+        # 实测在没开代理时解析 Instagram 会抛这个，比 timed out 更常见
+        "Network is unreachable",
+        "连不上网络。请检查：\n"
+        "① 代理是不是「全局」模式 —— 全局会把国内站点的流量也送出境，"
+        "抖音 / B站 会被拒；这种情况请改成「规则 / 智能分流」或「直连」模式；\n"
+        "② 如果解析的是境外站点（YouTube / Instagram / X / TikTok），"
+        "则需要代理确实在生效。",
+    ),
+    (
+        # 断网时实测抛这个（TLS 握手被截断）。不补这条的话，用户断网时
+        # 只能看到一串英文原文。
+        "UNEXPECTED_EOF_WHILE_READING",
+        "连不上网络（连接被中断）。请检查：\n"
+        "① 电脑是否连着网；\n"
+        "② 代理是不是「全局」模式 —— 全局会把国内站点的流量也送出境，"
+        "抖音 / B站 会被拒；这种情况请改成「规则 / 智能分流」或「直连」模式；\n"
+        "③ 如果解析的是境外站点（YouTube / Instagram / X / TikTok），"
+        "则需要代理确实在生效。",
     ),
     (
         "Unsupported URL",
@@ -496,9 +521,9 @@ class Engine:
             lines = [ln for ln in stderr.splitlines() if ln.strip()]
             ytdlp_err = lines[-1] if lines else "yt-dlp 未返回数据"
             # 抖音走不了 yt-dlp：它需要 a_bogus 签名和登录态，HTTP 客户端拿不到，
-            # 所以必然 403。改走浏览器备用链路（实测可拿到无水印直链）。
+            # 所以必然 403。改走抖音专有链路（见 _parse_douyin）。
             if detect_platform(url) == "抖音":
-                return self._parse_douyin_via_browser(url, ytdlp_err)
+                return self._parse_douyin(url, ytdlp_err)
             # X 也留一条备用链路：yt-dlp 的 X 提取器依赖官方接口，改版或限流时会失效
             if detect_platform(url) == "X":
                 return self._parse_x_via_service(url, ytdlp_err)
@@ -520,33 +545,35 @@ class Engine:
 
         return {
             "ok": True,
-            **rec,
+            # 补上历史库里已记录的本地产物路径：先下过再解析同一条时，
+            # 界面要据此直接播本地文件，而不是再提示「需下载才能播放」
+            **self._with_local_path(rec),
             "quality": self._describe_quality(info),
             "filesize": self._describe_size(info),
         }
 
     # ---- 下载 ----
 
-    def _parse_douyin_via_browser(self, url: str, ytdlp_err: str) -> dict:
-        """抖音备用链路：用真实浏览器监听接口响应，拿无水印直链。
+    def _parse_douyin(self, url: str, ytdlp_err: str) -> dict:
+        """抖音：优先直接调公开接口；接口不可用才降级到浏览器模式。
 
-        走通后返回的字段与 _to_record 一致，界面与下载逻辑无需区别对待。
+        与安卓端 ytdlp_engine._parse_douyin 同构 —— 改一处要同步另一处。
+        接口那条是纯 HTTP、秒回；浏览器那条要弹窗且慢数秒到十几秒，
+        所以只在接口失败时才走。
         """
         try:
-            from douyin_fallback import DouyinFallbackError, resolve
+            from douyin_fallback import resolve_via_api
 
-            data = resolve(url)
-        except DouyinFallbackError as exc:
-            return {
-                "ok": False,
-                "error": (
-                    f"抖音需要「浏览器模式」解析，但没能成功：{exc}\n"
-                    f"（yt-dlp 的错误：{friendly_error(ytdlp_err)}）"
-                ),
-            }
+            data = resolve_via_api(url)
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": f"抖音浏览器模式异常：{type(exc).__name__}: {exc}"}
+            api_err = f"{type(exc).__name__}: {exc}"
+            print(f"[douyin] 接口方案失败，降级到浏览器模式：{api_err}")
+            return self._parse_douyin_via_browser(url, ytdlp_err, api_err)
 
+        return self._douyin_result(data, url)
+
+    def _douyin_result(self, data: dict, url: str) -> dict:
+        """抖音两条路径（公开接口 / 浏览器监听）共用的入库与返回逻辑。"""
         rec = {
             "id": data.get("id") or url,
             "platform": "抖音",
@@ -566,12 +593,38 @@ class Engine:
         self.store.upsert(rec)
         return {
             "ok": True,
-            **rec,
+            **self._with_local_path(rec),
             "quality": "原始画质（无水印）",
             "filesize": "",
-            # 界面据此提示用户「用的是浏览器模式」，解释为什么要多等一会儿
-            "via": "browser",
         }
+
+    def _parse_douyin_via_browser(self, url: str, ytdlp_err: str, api_err: str = "") -> dict:
+        """抖音兜底链路：用真实浏览器监听接口响应，拿无水印直链。
+
+        只有公开接口失败时才会走到这里（见 _parse_douyin）。
+        """
+        try:
+            from douyin_fallback import DouyinFallbackError, resolve
+
+            data = resolve(url)
+        except DouyinFallbackError as exc:
+            api_line = f"接口方式：{api_err}\n" if api_err else ""
+            return {
+                "ok": False,
+                "error": (
+                    f"抖音解析失败，两种方式都没成功。\n"
+                    f"{api_line}"
+                    f"浏览器模式：{exc}\n"
+                    f"（yt-dlp 的错误：{friendly_error(ytdlp_err)}）"
+                ),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"抖音浏览器模式异常：{type(exc).__name__}: {exc}"}
+
+        result = self._douyin_result(data, url)
+        # 界面据此提示用户「用的是浏览器模式」，解释为什么要多等一会儿
+        result["via"] = "browser"
+        return result
 
     def _parse_x_via_service(self, url: str, ytdlp_err: str) -> dict:
         """X 备用链路：调第三方 FxTwitter 服务拿直链。
@@ -612,12 +665,34 @@ class Engine:
         self.store.upsert(rec)
         return {
             "ok": True,
-            **rec,
+            **self._with_local_path(rec),
             "quality": "最高画质（第三方服务解析）",
             "filesize": "",
             # 界面据此提示用的是备用通道，便于用户理解为什么偶尔会慢/失败
             "via": "service",
         }
+
+    def _with_local_path(self, rec: dict) -> dict:
+        """把历史库里已记录的产物路径补进解析结果。
+
+        与安卓端 ytdlp_engine._with_local_path 同构 —— 改一处要同步另一处。
+
+        解析结果原本不带 local_path（它来自 yt-dlp 的 info，而产物路径是下载
+        完成后才记进历史的）。于是「先下过某个视频、之后又解析同一条」时，
+        界面不知道文件已经存在，仍然提示「需下载后才能播放」。
+        这里按 id 优先、source_url 兜底去历史库找一次；文件已被删掉就忽略。
+        """
+        match = None
+        for old in self.store.all():
+            if rec.get("id") and old.get("id") == rec["id"]:
+                match = old
+                break
+            if match is None and old.get("source_url") == rec.get("source_url"):
+                match = old
+        path = ((match or {}).get("local_path") or "").strip()
+        if path and os.path.exists(path):
+            rec["local_path"] = path
+        return rec
 
     def _download_target(self, url: str) -> str:
         """决定真正要下载的地址。
