@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -58,10 +59,11 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ytdlp.android.engine.Download
 
-/** 三个页签。用 enum 而不是下标，免得以后插页面时对不上号。 */
+/** 四个页签。用 enum 而不是下标，免得以后插页面时对不上号。 */
 private enum class Tab(val label: String, val icon: ImageVector) {
     Parse("解析", Icons.Default.Search),
     History("历史", Icons.Default.List),
+    Md5("MD5", Icons.Default.Fingerprint),
     Settings("设置", Icons.Default.Settings),
 }
 
@@ -161,6 +163,7 @@ fun MainScreen(vm: AppViewModel) {
                 when (current) {
                     Tab.Parse -> ParseScreen(vm)
                     Tab.History -> HistoryScreen(vm)
+                    Tab.Md5 -> Md5Screen(vm)
                     Tab.Settings -> SettingsScreen(vm)
                 }
             }

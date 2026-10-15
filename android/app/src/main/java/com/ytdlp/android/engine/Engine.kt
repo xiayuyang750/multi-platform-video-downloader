@@ -125,10 +125,17 @@ object Engine {
      * 注意「已受理」不等于「下载成功」：真正的结果要靠 downloadState() 轮询。
      *
      * @param index 只对图文/图集有意义：0 = 全部，N = 只下第 N 张。
+     * @param spec  用户在结果区选中的下载档位（[Tier.specJson]）。
+     *              空串表示用引擎默认档（档位表第一项），行为与选档功能上线前一致。
      */
-    fun startDownload(context: Context, url: String, index: Int = 0): String? {
+    fun startDownload(
+        context: Context,
+        url: String,
+        index: Int = 0,
+        spec: String = "",
+    ): String? {
         val obj = JSONObject(
-            module(context).callAttr("start_download", url, index).toString()
+            module(context).callAttr("start_download", url, index, spec).toString()
         )
         return if (obj.optBoolean("ok")) null else obj.optString("error")
     }
@@ -180,6 +187,33 @@ object Engine {
     fun setCookiesFile(context: Context, path: String) {
         module(context).callAttr("set_cookies_file", path)
     }
+
+    /** 设置「下载完成时自动改写 MD5」，返回最新设置。 */
+    fun setRewriteMd5(context: Context, enabled: Boolean): Settings = Settings.fromJson(
+        JSONObject(module(context).callAttr("set_rewrite_md5", enabled).toString())
+    )
+
+    /** 已下载、且文件还在本地的产物列表（MD5 页的数据源）。 */
+    fun downloads(context: Context): List<DownloadItem> {
+        val arr = JSONArray(module(context).callAttr("list_downloads").toString())
+        return (0 until arr.length()).mapNotNull { i -> arr.optJSONObject(i)?.let(DownloadItem::fromJson) }
+    }
+
+    /** 现算某个文件的 MD5（不读库里的缓存值，用户可能自己动过这个文件）。 */
+    fun fileMd5(context: Context, path: String): Md5Result = Md5Result.fromJson(
+        JSONObject(module(context).callAttr("get_md5", path).toString())
+    )
+
+    /**
+     * 另存副本式改写 MD5：`src`（缓存里的副本）全程不动，成品写到 `dst`。
+     *
+     * 全应用只有这一条改 MD5 的对外接口 —— 不论改的是刚下载的产物还是用户从相册
+     * 挑来的东西，用户的原文件都不该被动到（下载收尾那次自动改写是引擎内部的另一
+     * 条路，见 ytdlp_engine._finish_download）。
+     */
+    fun editMd5To(context: Context, src: String, dst: String): Md5Result = Md5Result.fromJson(
+        JSONObject(module(context).callAttr("edit_md5_to", src, dst).toString())
+    )
 }
 
 /**
@@ -213,6 +247,23 @@ data class Video(
     val contentType: String = "video",
     /** 图文类的媒体列表（存的是 JSON 文本，用 mediaList 取解析结果） */
     val mediaJson: String = "",
+    /**
+     * 可选档位全集（存的是 JSON 文本，用 tierList 取解析结果）。
+     *
+     * 只有视频结果才有：图片 / 图集 / 实况图每张只有一个地址，没有「选规格」的
+     * 概念。存 JSON 文本而不是对象，理由与 mediaJson 相同 —— 这个类既要跨语言
+     * 传递，又要写进历史库，一路用字符串最省事，只在要展示时才解析这一次。
+     */
+    val tiersJson: String = "",
+    /**
+     * 平台在解析结果里**自报**的 MD5（抖音每个档位都带 file_hash）。
+     *
+     * 有它，界面就能在**下载之前**把 MD5 显示出来，不必等文件下来。它是平台说的
+     * 值，不保证等于成品实际算出来的那个（改名、重封装都会让 MD5 变）。
+     */
+    val sourceMd5: String = "",
+    /** 成品文件实际算出来的 MD5；只在下载完成后回填，重新解析不会冲掉它 */
+    val fileMd5: String = "",
 ) {
     /** 图文 / 图集 / 实况图：播放器用不上，界面上走图片浏览 */
     val isGallery: Boolean get() = contentType == "images" || contentType == "live"
@@ -237,6 +288,35 @@ data class Video(
                     live = o.optString("live"),
                     // X 的媒体列表里可能混着视频，得靠它区分「翻页看图」还是「播放这段」
                     kind = o.optString("kind").ifBlank { "image" },
+                )
+            }
+        }.getOrElse { emptyList() }
+    }
+    /**
+     * 可选的下载档位，按「好 → 差」排列 —— 第一项即默认选中项。
+     *
+     * 排序规则由引擎（Python 侧）统一决定，界面不再算一遍，避免两处各排各的。
+     * 只有多于一个档位时界面才显示选择器：一个档位等于没得选。
+     */
+    val tierList: List<Tier> by lazy {
+        if (tiersJson.isBlank()) return@lazy emptyList()
+        runCatching {
+            val arr = JSONArray(tiersJson)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val u = o.optString("url")
+                val sel = o.optString("selector")
+                // 直链型与格式表达式型至少要有一个，否则这条档位根本没法下载
+                if (u.isBlank() && sel.isBlank()) return@mapNotNull null
+                Tier(
+                    label = o.optString("label").ifBlank { u.ifBlank { sel } },
+                    height = o.optInt("height"),
+                    vcodec = o.optString("vcodec"),
+                    // optLong 在键缺失时返回 0，会把「不知道体积」说成 0 字节
+                    filesize = if (o.isNull("filesize")) null else o.optLong("filesize"),
+                    url = u,
+                    selector = sel,
+                    hash = o.optString("hash"),
                 )
             }
         }.getOrElse { emptyList() }
@@ -289,6 +369,9 @@ data class Video(
             via = o.optString("via"),
             contentType = o.optString("content_type").ifBlank { "video" },
             mediaJson = o.optString("media_json"),
+            // 档位在解析结果里就是 JSON **数组**，转成文本交给界面。
+            // 历史记录（fromRow）没有这一项 —— 档位是解析期的信息，不落库。
+            tiersJson = o.optJSONArray("tiers")?.toString() ?: "",
         )
 
         fun fromRow(o: JSONObject) = Video(
@@ -328,6 +411,48 @@ data class Media(
     val kind: String = "image",
 )
 
+/**
+ * 一个可选的下载档位。
+ *
+ * 两种形态**二选一**，取决于平台给的是哪种流：
+ *   url      直链型 —— 抖音这类接口直接给一条完整 mp4 地址，「选哪个下哪个」
+ *   selector yt-dlp 型 —— YouTube / B站 是 DASH 分离流（视频轨 + 音频轨），
+ *            单给一条 URL 拿不到完整视频，必须把规格翻译成 yt-dlp 的格式表达式
+ *
+ * 界面不关心二者差别，只把 [specJson] 交给引擎。
+ */
+data class Tier(
+    /** 直接展示给用户的文案，如「720p · H.265 · 37.4 MB」—— 由引擎侧拼好 */
+    val label: String,
+    /** 分辨率高度，供「逐条回退」判断用；拿不到就是 0 */
+    val height: Int = 0,
+    /** "h264" / "h265"；拿不到就是空串 */
+    val vcodec: String = "",
+    /** 字节数；接口没给就是 null */
+    val filesize: Long? = null,
+    val url: String = "",
+    val selector: String = "",
+    /**
+     * 平台自报的 MD5（抖音的 `play_addr.file_hash`）；拿不到就是空串。
+     *
+     * 用它是为了在下载**之前**就能显示 MD5。真伪要等文件下来再核对 ——
+     * 平台报的是它自己那份流的摘要。
+     */
+    val hash: String = "",
+) {
+    /**
+     * 交给引擎的下载规格（JSON 文本）。
+     *
+     * 用 JSONObject 而不是手拼字符串：直链里带 `&`、`?` 这类字符，
+     * 手拼转义很容易漏掉一处，出了错要到下载失败才暴露。
+     */
+    val specJson: String
+        get() = JSONObject().apply {
+            if (url.isNotBlank()) put("url", url)
+            if (selector.isNotBlank()) put("selector", selector)
+        }.toString()
+}
+
 /** 下载状态快照。type 取值：idle / starting / progress / processing / done / error */
 data class Download(
     val type: String,
@@ -359,6 +484,10 @@ data class Download(
      * 靠 seq 变化来判定"新的一次完成"，两个问题一起解决。
      */
     val seq: Long = 0L,
+    /** 成品文件的 MD5（下载完成时算出）；改过 MD5 时它是**改之前**的值 */
+    val md5: String = "",
+    /** 改写后的 MD5。空串表示没改（开关关着，或改写失败） */
+    val md5After: String = "",
 ) {
     val isError: Boolean get() = type == "error"
     val isDone: Boolean get() = type == "done"
@@ -379,6 +508,8 @@ data class Download(
             eta = o.optIntOrNull("eta"),
             url = o.optString("url"),
             seq = o.optLong("seq"),
+            md5 = o.optString("md5"),
+            md5After = o.optString("md5_after"),
         )
     }
 }
@@ -390,6 +521,8 @@ data class Settings(
     val preferredDir: String,
     val cookiesFile: String,
     val cookiesPresent: Boolean,
+    /** 下载完成时是否自动改写 MD5。默认关（见引擎 set_rewrite_md5 的说明） */
+    val rewriteMd5OnDownload: Boolean = false,
 ) {
     companion object {
         fun fromJson(o: JSONObject) = Settings(
@@ -398,6 +531,75 @@ data class Settings(
             preferredDir = o.optString("preferred_dir"),
             cookiesFile = o.optString("cookies_file"),
             cookiesPresent = o.optBoolean("cookies_present"),
+            rewriteMd5OnDownload = o.optBoolean("rewrite_md5_on_download"),
+        )
+    }
+}
+
+/**
+ * MD5 页列表里的一条：一个已下载、且文件还在本地的产物。
+ *
+ * 只列**文件**，不列图文/图集那种目录 —— 那类产物是一整个文件夹，
+ * 谈不上「这一个文件的 MD5」（用户要的也只是视频）。
+ */
+data class DownloadItem(
+    val id: String,
+    val title: String,
+    val platform: String,
+    val path: String,
+    val filename: String,
+    val size: Long,
+    /** 平台自报的 MD5；抖音才有，其余平台为空 */
+    val sourceMd5: String = "",
+    /** 库里记的成品 MD5（下载完成时算的） */
+    val fileMd5: String = "",
+) {
+    companion object {
+        fun fromJson(o: JSONObject) = DownloadItem(
+            id = o.optString("id"),
+            title = o.optString("title"),
+            platform = o.optString("platform"),
+            path = o.optString("path"),
+            filename = o.optString("filename"),
+            size = o.optLong("size"),
+            sourceMd5 = o.optString("source_md5"),
+            fileMd5 = o.optString("file_md5"),
+        )
+    }
+}
+
+/**
+ * MD5 操作的结果。查看（get_md5）与改写（edit_md5_to）共用：
+ * 查看只用 md5，改写还会带 before / after 与 changed。
+ */
+data class Md5Result(
+    val ok: Boolean,
+    val error: String = "",
+    val path: String = "",
+    /** 查看时是当前值 */
+    val md5: String = "",
+    /** 改写前的值 */
+    val before: String = "",
+    /** 改写后的值 */
+    val after: String = "",
+    /**
+     * 字节是否真的变了。
+     *
+     * 需要它是因为「跑完没报错」不等于「MD5 变了」——实测图片走 ffmpeg 重封装就会产出
+     * 与原件逐字节相同的结果。界面据此把这种情况判成失败，而不是显示一个和原值一模
+     * 一样的新值让用户以为改成功了。
+     */
+    val changed: Boolean = false,
+) {
+    companion object {
+        fun fromJson(o: JSONObject) = Md5Result(
+            ok = o.optBoolean("ok"),
+            error = o.optString("error"),
+            path = o.optString("path"),
+            md5 = o.optString("md5"),
+            before = o.optString("before"),
+            after = o.optString("after"),
+            changed = o.optBoolean("changed"),
         )
     }
 }

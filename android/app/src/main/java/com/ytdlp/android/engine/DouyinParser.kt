@@ -4,17 +4,40 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 抖音 aweme/detail 接口响应的解析。
+ * 详情接口响应解析出来的三种结果。
  *
- * 逻辑与 windows/douyin_fallback.py 的 _pick_tiers 一一对应 —— 两端面对的是
- * 同一个接口、同一套字段，所以提取规则必须一致，改一处要同步另一处。
+ * 分成三态、而不是像以前那样「拿不到就返回 null」，是因为「服务端明确说这条
+ * 作品看不了」和「这份响应里根本没有我们要的东西」对用户的意义完全不同：
+ * 前者是定论（该立刻如实告知），后者只是还没拦到（该继续等）。
+ */
+sealed class DouyinDetail {
+    /** 拿到作品数据，payload 直接交给引擎的 save_douyin 入库。 */
+    data class Video(val payload: JSONObject) : DouyinDetail()
+
+    /** 服务端明确说这条作品看不了（仅自己可见 / 已删除 / 审核中）。 */
+    data class Unavailable(val message: String) : DouyinDetail()
+
+    /** 这份响应里没有目标作品的数据。 */
+    object None : DouyinDetail()
+}
+
+/**
+ * 抖音作品数据的解析。
  *
  * 这里只做「从一段 JSON 里挑出要的字段」这一件事，不碰网络、不碰 WebView，
- * 因此可以脱离设备单独验证。
+ * 因此可以脱离设备单独验证。字段规范与 windows/douyin_fallback.py 一一对应 ——
+ * 两端面对的是同一个接口、同一套字段，改一处要同步另一处。
+ *
+ * 档位（分辨率 / 编码 / 体积）的**挑选规则不在这里**：详情接口拿到的 video
+ * 对象原样交给引擎，由 Python 侧的 douyin_pick_tiers / douyin_collect_tiers 去挑。
+ * 这里原本还有一份 Kotlin 实现，同一套规则放两处迟早会算出不一样的结果，已删。
  */
 object DouyinParser {
 
-    /** 单条视频的详情接口。用子串匹配，兼容不同版本的路径前缀。 */
+    /**
+     * 单条作品的详情接口。用子串匹配，兼容不同版本的路径前缀
+     * （网页版是 `aweme/v1/web/aweme/detail/`）。
+     */
     const val DETAIL_API = "aweme/detail/"
 
     /**
@@ -27,18 +50,38 @@ object DouyinParser {
     private const val IMAGES_KEY = "\\\"images\\\":"
 
     /**
-     * 从响应体里提取视频信息。
+     * 解析详情接口的响应体。
      *
-     * @return 结构化数据；返回 null 表示这条响应里没有视频数据
-     *         （比如链接指向的是用户主页或合集，而不是单条视频）。
+     * 这是**视频类作品**唯一能拿到数据的路：抖音的视频页主文档只是一个 JS
+     * 虚拟机壳（实测 72914 字节、零数据），真正的数据是页面里的脚本算好签名后
+     * 再去请求 `aweme/v1/web/aweme/detail/` 拿回来的。所以视频必须靠拦这条请求。
+     * 图文 / 图集 / 实况图不同 —— 那些页面服务端直出数据，走 parseMainDocument。
+     *
+     * @param expectedId 目标作品编号（取自页面地址）。页面可能顺带请求别的作品，
+     *                   编号对不上的一律丢弃 —— 否则会把别人的视频当成果下走。
      */
-    fun parse(body: String, sourceUrl: String): JSONObject? {
-        val root = runCatching { JSONObject(body) }.getOrNull() ?: return null
-        val detail = root.optJSONObject("aweme_detail") ?: return null
-        val video = detail.optJSONObject("video") ?: return null
+    fun parseDetail(body: String, sourceUrl: String, expectedId: String): DouyinDetail {
+        val root = runCatching { JSONObject(body) }.getOrNull() ?: return DouyinDetail.None
+        val detail = root.optJSONObject("aweme_detail")
 
-        val (playUrl, downloadUrl) = pickTiers(video)
-        if (playUrl.isBlank()) return null
+        if (detail == null) {
+            // 服务端明确说这条作品看不了（仅自己可见 / 已删除 / 审核中）。
+            // 这是定论：换链路、补 Cookie 都不会有结果，所以把它的原话直接回给
+            // 用户，不必让人干等到 45 秒超时再看一句含糊的「网络较慢」。
+            val filter = root.optJSONObject("filter_detail") ?: return DouyinDetail.None
+            val id = filter.optString("aweme_id")
+            if (expectedId.isNotBlank() && id.isNotBlank() && id != expectedId) {
+                return DouyinDetail.None
+            }
+            val msg = filter.optString("detail_msg")
+            return if (msg.isBlank()) DouyinDetail.None else DouyinDetail.Unavailable(msg)
+        }
+
+        val id = detail.optString("aweme_id")
+        if (expectedId.isNotBlank() && id.isNotBlank() && id != expectedId) {
+            return DouyinDetail.None
+        }
+        val video = detail.optJSONObject("video") ?: return DouyinDetail.None
 
         val author = detail.optJSONObject("author") ?: JSONObject()
         val cover = video.optJSONObject("cover")
@@ -47,83 +90,27 @@ object DouyinParser {
             .orEmpty()
         val durationMs = video.optLong("duration", 0L)
 
-        return JSONObject().apply {
-            put("id", detail.optString("aweme_id"))
-            put("title", detail.optString("desc"))
-            put("uploader", author.optString("nickname"))
-            put(
-                "uploader_id",
-                author.optString("unique_id").ifBlank { author.optString("short_id") },
-            )
-            put(
-                "duration",
-                if (durationMs > 0) durationMs / 1000 else JSONObject.NULL,
-            )
-            put("thumbnail", cover)
-            put("play_url", playUrl)
-            put("download_url", downloadUrl)
-            put("source_url", sourceUrl)
-        }
-    }
-
-    /**
-     * 从 bit_rate 里挑出两个地址：能播的最高档、画质最高的档。
-     *
-     * 抖音的 video.play_addr 只是「默认档」，bit_rate 数组才是全部档位
-     * （实测同一视频有 23 档）。关键差异：最高码率档通常是 H.265 编码，
-     * 而 H.265 在浏览器和部分安卓设备上放不出来；能播的最高档是
-     * H.264 + 完整 mp4。
-     *
-     * 所以分开选，各自用在合适的地方：
-     *   play_url     → 放进播放器直接看
-     *   download_url → 下载用，画质最好
-     */
-    private fun pickTiers(video: JSONObject): Pair<String, String> {
-        var bestPlay = ""
-        var bestPlayKey = -1L to -1L
-        var bestAny = ""
-        var bestAnyKey = -1L to -1L
-
-        // (清晰度, 码率) 的字典序比较。Kotlin 的 Pair 没有现成的比较运算符，
-        // 这里自己写清楚，免得依赖隐式扩展而编译不过。
-        fun isBetter(a: Pair<Long, Long>, b: Pair<Long, Long>): Boolean =
-            a.first > b.first || (a.first == b.first && a.second > b.second)
-
-        val bitRates = video.optJSONArray("bit_rate")
-        if (bitRates != null) {
-            for (i in 0 until bitRates.length()) {
-                val item = bitRates.optJSONObject(i) ?: continue
-                val play = item.optJSONObject("play_addr") ?: continue
-                val urls = play.optJSONArray("url_list") ?: continue
-                if (urls.length() == 0) continue
-                val url = urls.optString(0)
-                if (url.isBlank()) continue
-
-                val key = play.optLong("height", 0L) to item.optLong("bit_rate", 0L)
-                if (isBetter(key, bestAnyKey)) {
-                    bestAnyKey = key
-                    bestAny = url
-                }
-
-                // 只有 H.264 且是完整 mp4 的才适合直接播放
-                val isH265 = item.optInt("is_h265", 0) != 0
-                if (!isH265 && item.optString("format") == "mp4" && isBetter(key, bestPlayKey)) {
-                    bestPlayKey = key
-                    bestPlay = url
-                }
+        return DouyinDetail.Video(
+            JSONObject().apply {
+                put("id", id.ifBlank { expectedId })
+                put("title", detail.optString("desc"))
+                put("uploader", author.optString("nickname"))
+                put(
+                    "uploader_id",
+                    author.optString("unique_id").ifBlank { author.optString("short_id") },
+                )
+                put(
+                    "duration",
+                    if (durationMs > 0) durationMs / 1000 else JSONObject.NULL,
+                )
+                put("thumbnail", cover)
+                put("source_url", sourceUrl)
+                put("content_type", "video")
+                // 档位与默认档的挑选交给引擎（见类注释），这里把 video 原样带过去。
+                // 网页版这个对象实测自带 bit_rate（本次样本 11 档），够用。
+                put("video_raw", video.toString())
             }
-        }
-
-        // 没有符合的档位就退回默认地址，保证至少有个能用的
-        if (bestPlay.isBlank()) {
-            bestPlay = video.optJSONObject("play_addr")
-                ?.optJSONArray("url_list")
-                ?.optString(0)
-                .orEmpty()
-        }
-        if (bestAny.isBlank()) bestAny = bestPlay
-
-        return bestPlay to bestAny
+        )
     }
 
     // ==================== 主文档（页面）解析 ====================

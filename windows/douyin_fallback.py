@@ -243,30 +243,44 @@ atexit.register(_shutdown_browser)
 def _pick_tiers(video: dict) -> tuple[str, str]:
     """从 bit_rate 里挑出两个地址：能播的最高档、画质最高的档。
 
+    与安卓端 ytdlp_engine.douyin_pick_tiers / Kotlin 侧 DouyinParser.pickTiers
+    是同一份规格，改一处要同步另两处。
+
     抖音的 video.play_addr 只是「默认档」，bit_rate 数组才是全部档位
-    （实测同一视频有 23 档）。关键差异：最高码率档是 H.265 编码
-    （1080p / 1065kbps / 127.9MB），而浏览器普遍播不了 H.265；
-    能播的最高档是 H.264 + 完整 mp4（1080p / 964kbps / 115.8MB）。
+    （实测同一视频有 23 档）。
+
+    选档 key = (分辨率, 是否 H.264, 码率) 的字典序最大者，**分辨率排第一位**：
+    宁可要 720p 的 H.265，也不退回 576p 的 H.264 —— 实测同一支视频，默认档给的是
+    1024x576 H.264@995kbps，而 bit_rate 里有 1280x720 H.265，按分辨率优先
+    后者才是画质更好的那个（体积还只有一半）。
+
+    同分辨率下优先 H.264：H.265 同画质体积小，但兼容性差（部分播放器 / 相册 /
+    剪辑软件不认），而下载产物是要长期留着的；只是**不以牺牲分辨率为代价**。
 
     所以分开选，各自用在合适的地方：
-      - play_url     → 放进 <video> 直接播
-      - download_url → 下载用，画质最好
+      - play_url     → 放进 <video> 直接播（还要求 H.264 + 完整 mp4）
+      - download_url → 下载用，分辨率最高、同档优先 H.264
     """
-    best_play, best_play_key = "", (-1, -1)
-    best_any, best_any_key = "", (-1, -1)
+    best_play, best_play_key = "", (-1, -1, -1)
+    best_any, best_any_key = "", (-1, -1, -1)
 
     for item in video.get("bit_rate") or []:
         play = item.get("play_addr") or {}
         urls = play.get("url_list") or []
         if not urls:
             continue
-        key = (int(play.get("height") or 0), int(item.get("bit_rate") or 0))
+
+        is_h265 = int(item.get("is_h265") or 0) != 0
+        # 三元 key 直接按字典序比较：(分辨率, 编码偏好, 码率)
+        key = (int(play.get("height") or 0),
+               0 if is_h265 else 1,
+               int(item.get("bit_rate") or 0))
 
         if key > best_any_key:
             best_any_key, best_any = key, urls[0]
 
         # 只有 H.264 且是完整 mp4 的才适合直接放进浏览器 <video>
-        if int(item.get("is_h265") or 0) == 0 and str(item.get("format") or "") == "mp4":
+        if not is_h265 and str(item.get("format") or "") == "mp4":
             if key > best_play_key:
                 best_play_key, best_play = key, urls[0]
 

@@ -20,14 +20,17 @@ tkinter 文件夹选择框、explorer 打开目录。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import threading
 import time
 import urllib.request
+import zlib
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -43,6 +46,9 @@ CONFIG_FILE = BASE_DIR / "defaults.json"
 # 与 Windows 端 engine.DIRECT_URL_HOSTS 对应，改一处要同步另一处。
 DIRECT_URL_HOSTS = ("douyinvod.com", "365yg.com", "amemv.com", "video.twimg.com")
 
+# 直链分块下载的读取粒度。太小会让线程调度开销盖过收益，1 MiB 是实测的折中。
+_DIRECT_READ = 1 << 20
+
 PLATFORM_RULES = [
     ("YouTube", r"(^|//)([a-z0-9-]+\.)*youtu\.?be"),
     ("B站", r"(^|//)([a-z0-9-]+\.)*(bilibili\.com|b23\.tv)"),
@@ -57,6 +63,51 @@ PLATFORM_RULES = [
 # 安卓文件名硬上限是 255 **字节**（ext4 / FUSE 的限制都是按字节算的）。
 # 中文一个字 3 字节、emoji 4 字节，所以不能像 Windows 端那样按字符数估算。
 MAX_NAME_BYTES = 200
+
+# 「链接」的形状：scheme://主机，主机必须带点。
+# 主机要求带点，是为了不把 "abc://def" 这种随手打的当成链接放过去。
+_URL_SHAPE = re.compile(r"^[a-z][a-z0-9+.\-]*://[^\s/?#]+\.[^\s/?#]+", re.I)
+
+
+def looks_like_url(text: str) -> bool:
+    """判断输入是不是一条链接。
+
+    用户嘴里说的「链接」就是 scheme://主机 这个形状。不拦的话，一段随手打的字
+    会一路送到 yt-dlp，最后报出 `ERROR: [generic] '……' is not a valid URL` ——
+    用户看不懂，还会以为是站点出了问题（实测就是这么被反馈上来的）。
+    """
+    return bool(_URL_SHAPE.match((text or "").strip()))
+
+
+# 图片扩展名。MD5 改写对图片要另走一条路（见 Engine._rewrite_image_md5）：
+# ffmpeg -c copy 对 jpg/png/webp 产出的字节与原件完全相同，改不动 MD5。
+IMAGE_EXTS = {
+    ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif", ".heic", ".heif",
+}
+
+
+def _copy_partial(src_file, dst_file, length: int) -> None:
+    """把 src 开头 length 个字节拷到 dst。分块拷，不整份读进内存。"""
+    left = length
+    while left > 0:
+        block = src_file.read(min(left, _DIRECT_READ))
+        if not block:
+            break
+        dst_file.write(block)
+        left -= len(block)
+
+
+def file_md5(path: str) -> str:
+    """流式算一个文件的 MD5。
+
+    必须分块读：抖音高清档动辄上百 MB，整份读进内存会直接把应用撑爆
+    （安卓上给 Python 的堆本来就紧）。1 MiB 块是实测的折中。
+    """
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def detect_platform(url: str) -> str:
@@ -116,38 +167,116 @@ def douyin_video_id(url: str) -> str:
     return ""
 
 
+def _tier_label(height: int, vcodec: str, filesize: int | None) -> str:
+    """拼一条档位的展示文案，如「720p · H.265 · 37.4 MB」。
+
+    在 Python 侧拼好、界面直接显示 —— 两端（安卓 / Windows）与 Kotlin 侧
+    都不必各写一份格式化逻辑，避免三处各算出不一样的字符串。
+    """
+    parts = []
+    if height:
+        parts.append(f"{height}p")
+    codec = {
+        "h264": "H.264", "h265": "H.265", "vp9": "VP9", "av1": "AV1",
+    }.get(vcodec or "", "")
+    if codec:
+        parts.append(codec)
+    if filesize:
+        parts.append(f"{filesize / 1024 / 1024:.1f} MB")
+    return " · ".join(parts) or "原始画质"
+
+
+def douyin_collect_tiers(video: dict) -> list[dict]:
+    """把 bit_rate 数组整理成「给界面用的档位全集」，按好 → 差排序。
+
+    与 Kotlin 侧 DouyinParser.collectTiers 是同构实现，改一处要同步另一处。
+
+    每条：{label, height, vcodec, filesize, url, hash}
+      label    给用户看的（如「720p · H.265 · 37.4 MB」）
+      height   分辨率 —— 排序和「逐条回退」都靠它
+      vcodec   "h264" / "h265"
+      filesize 字节数；接口没给就是 None
+      url      该档位的直链
+      hash     平台自报的 MD5（play_addr.file_hash）；没给就是空串
+
+    排序 key = (分辨率, 是否 H.264, 码率)，**与默认下载档的选取规则完全一致**，
+    所以列表第一项就是默认选中项 —— 界面不必再算一遍。
+
+    分辨率排第一位：宁可要 720p 的 H.265，也不退回 576p 的 H.264 —— 实测同一支
+    视频，默认档给的是 1024x576 H.264@995kbps，而 bit_rate 里有 1280x720 H.265，
+    按分辨率优先后者才是画质更好的那个（体积还只有一半）。
+    同分辨率下优先 H.264：H.265 同画质体积小，但兼容性差（部分播放器 / 相册 /
+    剪辑软件不认），而下载产物是要长期留着的。
+    """
+    rows: list[dict] = []
+    for item in video.get("bit_rate") or []:
+        play = item.get("play_addr") or {}
+        urls = play.get("url_list") or []
+        if not urls or not urls[0]:
+            continue
+        size = item.get("data_size") or play.get("data_size")
+        rows.append({
+            "height": int(play.get("height") or 0),
+            "vcodec": "h265" if int(item.get("is_h265") or 0) != 0 else "h264",
+            "fmt": str(item.get("format") or ""),
+            "kbps": int(item.get("bit_rate") or 0),
+            "filesize": int(size) if size else None,
+            "url": urls[0],
+            # 平台自报的 MD5（网页版实测每个档位都带 file_hash，32 位十六进制）。
+            # 有它就能在**下载前**先把 MD5 显示出来；真伪等文件下来再核对。
+            "hash": str(play.get("file_hash") or ""),
+        })
+
+    # 默认档（video.play_addr）不一定出现在 bit_rate 里 —— 实测那条 ASMR 视频就是：
+    # bit_rate 里全是 H.265 档，而默认档另有一条 1024x576 的流（旧工具下载到的
+    # 84MB H.264 文件正是来自它）。漏掉它，用户会以为「这条视频只能选 H.265」。
+    # 所以：默认地址不与任何已收集档位重复时，作为额外一档补进来。
+    # 同一段逻辑也顺带覆盖「bit_rate 整个为空」（老作品 / 接口降级）的情况 ——
+    # 那时 rows 是空的，这个地址自然就成了唯一一档。
+    #
+    # 编码**不猜**：play_addr 字段本身不带 vcodec，猜错等于标签撒谎，
+    # 所以留空 —— 标签里就只显示分辨率。
+    pa = video.get("play_addr") or {}
+    pa_urls = pa.get("url_list") or []
+    default_url = pa_urls[0] if pa_urls else ""
+    if default_url and not any(r["url"] == default_url for r in rows):
+        rows.append({
+            "height": int(pa.get("height") or 0),
+            "vcodec": "",
+            "fmt": "mp4",
+            "kbps": 0,
+            "filesize": None,
+            "url": default_url,
+            "hash": str(pa.get("file_hash") or ""),
+        })
+
+    rows.sort(
+        key=lambda r: (r["height"], 1 if r["vcodec"] == "h264" else 0, r["kbps"]),
+        reverse=True,
+    )
+    for r in rows:
+        r["label"] = _tier_label(r["height"], r["vcodec"], r["filesize"])
+    return rows
+
+
 def douyin_pick_tiers(video: dict) -> tuple:
-    """从 bit_rate 里挑两条地址：能播的最高档、画质最高的档。
+    """从档位全集里挑两条地址：能直接播的、默认下载的。
 
     与 Kotlin 侧 DouyinParser.pickTiers 逻辑一致（那边是浏览器模式兜底用的），
     改一处要同步另一处。
 
     抖音的 video.play_addr 只是「默认档」，bit_rate 数组才是全部档位。
-    最高码率档通常是 H.265，浏览器和部分设备放不出来；能播的最高档是
-    H.264 + 完整 mp4。所以分开选：play_url 用于播放，download_url 用于下载。
+
+    - 默认下载档 = 档位全集的第一项（规则见 collect_tiers）
+    - 播放档 = 第一条 H.264 + 完整 mp4；没有就退回默认地址
+      播放比下载更保守：H.265 在浏览器和部分设备上放不出来。
     """
-    best_play, best_play_key = "", (-1, -1)
-    best_any, best_any_key = "", (-1, -1)
-
-    def better(a: tuple, b: tuple) -> bool:
-        return a[0] > b[0] or (a[0] == b[0] and a[1] > b[1])
-
-    for item in video.get("bit_rate") or []:
-        play = item.get("play_addr") or {}
-        urls = play.get("url_list") or []
-        if not urls:
-            continue
-        url = urls[0]
-        if not url:
-            continue
-        key = (int(play.get("height") or 0), int(item.get("bit_rate") or 0))
-
-        if better(key, best_any_key):
-            best_any_key, best_any = key, url
-
-        is_h265 = int(item.get("is_h265") or 0) != 0
-        if not is_h265 and str(item.get("format") or "") == "mp4" and better(key, best_play_key):
-            best_play_key, best_play = key, url
+    tiers = douyin_collect_tiers(video)
+    best_any = tiers[0]["url"] if tiers else ""
+    best_play = next(
+        (t["url"] for t in tiers if t["vcodec"] == "h264" and t["fmt"] == "mp4"),
+        "",
+    )
 
     # 没有符合的档位就退回默认地址，保证至少有个能用的
     if not best_play:
@@ -156,6 +285,100 @@ def douyin_pick_tiers(video: dict) -> tuple:
     if not best_any:
         best_any = best_play
     return best_play, best_any
+
+
+# ==================== yt-dlp 平台：把 formats 归并成档位 ====================
+# 与抖音那条的**关键区别**：yt-dlp 平台给的是「流」，不是「文件」。
+# YouTube / B站 早已全面 DASH 化（实测 YouTube 53 个格式里 0 个音视频合一，
+# B站 也全是 audio only + video only），画面和声音是两条分开的流 ——
+# 单给一条 URL 拿不到完整视频。所以这里的档位不是「一条地址」，而是一个
+# **分辨率档** + 一条交给 yt-dlp 的选流表达式（selector），由它去取流并合流。
+
+
+def _ytdlp_vcodec_name(raw: str) -> str:
+    """把 yt-dlp 的 vcodec 串归成档位标签用的短名。
+
+    yt-dlp 给的是编码全名（avc1.640028 / hev1.1.6.L93.B0 / vp09.00.51 / av01.0.05M），
+    这里只保留人看得懂的那一层：H.264 / H.265 / VP9 / AV1。
+    认不出来就返回空串 —— 标签里只显示分辨率，不硬塞一个错的编码名。
+    """
+    v = (raw or "").lower()
+    if v.startswith(("avc1", "avc3")):
+        return "h264"
+    if v.startswith(("hev1", "hvc1")):
+        return "h265"
+    if v.startswith(("vp9", "vp09")):
+        return "vp9"
+    if v.startswith("av01"):
+        return "av1"
+    return ""
+
+
+def ytdlp_collect_tiers(info: dict) -> list[dict]:
+    """把 yt-dlp 的 formats 归并成「给界面用的档位全集」，按好 → 差排序。
+
+    每条：{label, height, vcodec, filesize, selector}
+
+    归并规则：
+      - 按**分辨率高度**分档（1080p / 720p / …），同一高度只保留一条
+      - 纯音频流不参与选择 —— 它是 `+ba` 自动带上的那部分，用户不需要单独挑
+      - 同一高度优先 H.264：兼容性更好（部分播放器 / 剪辑软件不认 H.265 / AV1），
+        与抖音那边的规则保持一致。实测 B站 每个高度都有 avc1 / hvc1 / av01 三种，
+        按码率也是 H.264 最高，所以这条规则同时也等于「该高度画质最好的那条」
+      - **selector 钉住具体格式**（`<视频格式ID>+<音频格式ID>`），而不是用
+        `bv*[height<=H]+ba` 这种范围表达式 —— 实测踩过坑：范围表达式等于把编码的
+        决定权交给 yt-dlp，它会挑 AV1，于是标签上写着 H.264、实际下到的却是 AV1，
+        体积也对不上（88MB vs 标签 147MB）。钉住之后标签写的才真是会下到的那条。
+        尾部仍留两级回退（`<视频ID>+ba` / `b[height<=H]`），免得格式 ID 变了直接失败
+      - 体积 = 该档视频流 + 最好的那条音频流；**拿不到就省略**，不编一个数字出来
+    """
+    formats = info.get("formats") or []
+
+    # 音频只用于估体积和被 selector 引用：合并后的成品 = 视频流 + 音频流。
+    # 按码率挑最好的一条（与 yt-dlp 的 `ba` 取法一致，这样估算才对得上实际）。
+    audio_id, audio_size, audio_tbr = "", 0, -1
+    for f in formats:
+        if f.get("vcodec") == "none" and f.get("acodec") != "none":
+            tbr = int(f.get("tbr") or 0)
+            if tbr > audio_tbr:
+                audio_tbr = tbr
+                audio_id = str(f.get("format_id") or "")
+                audio_size = int(f.get("filesize") or f.get("filesize_approx") or 0)
+
+    by_height: dict[int, dict] = {}
+    for f in formats:
+        if not f.get("url") or f.get("vcodec") == "none":
+            continue
+        height = int(f.get("height") or 0)
+        if not height:
+            continue
+        name = _ytdlp_vcodec_name(f.get("vcodec"))
+        # 同高度优先 H.264（rank=1），其余排后面；再比码率
+        key = (1 if name == "h264" else 0, int(f.get("tbr") or f.get("vbr") or 0))
+        cur = by_height.get(height)
+        if cur is None or key > cur["_key"]:
+            video_size = int(f.get("filesize") or f.get("filesize_approx") or 0)
+            vid_id = str(f.get("format_id") or "")
+            if vid_id and audio_id:
+                selector = f"{vid_id}+{audio_id}/{vid_id}+ba/b[height<={height}]"
+            elif vid_id:
+                selector = f"{vid_id}+ba/b[height<={height}]"
+            else:
+                selector = f"b[height<={height}]"
+            by_height[height] = {
+                "_key": key,
+                "height": height,
+                "vcodec": name,
+                "filesize": (video_size + audio_size) or None,
+                "selector": selector,
+            }
+
+    rows = sorted(by_height.values(),
+                  key=lambda r: (r["height"], r["_key"]), reverse=True)
+    for r in rows:
+        r.pop("_key", None)
+        r["label"] = _tier_label(r["height"], r["vcodec"], r["filesize"])
+    return rows
 
 
 # ==================== 报错翻译 ====================
@@ -463,13 +686,22 @@ class Store:
             self.conn.execute("ALTER TABLE history ADD COLUMN content_type TEXT")
         if "media_json" not in cols:
             self.conn.execute("ALTER TABLE history ADD COLUMN media_json TEXT")
+        # 两个 MD5：
+        #   source_md5 —— 平台在解析结果里自报的（抖音每个档位都带 file_hash），
+        #                 所以「下载前」就能显示，不必等文件下来
+        #   file_md5   —— 成品文件实际算出来的。它只在下载收尾时回填，**不进 upsert**，
+        #                 这样重新解析同一条不会把已经算好的值冲掉
+        if "source_md5" not in cols:
+            self.conn.execute("ALTER TABLE history ADD COLUMN source_md5 TEXT")
+        if "file_md5" not in cols:
+            self.conn.execute("ALTER TABLE history ADD COLUMN file_md5 TEXT")
 
     def upsert(self, rec: dict) -> None:
         # 图文类没有 resolved_url / download_url / play_kind，这里补默认值，
         # 免得每条调用点都要自己填一遍。
         row = {
             "resolved_url": "", "download_url": "", "play_kind": "none",
-            "content_type": "video", "media_json": "",
+            "content_type": "video", "media_json": "", "source_md5": "",
             **rec,
         }
         with self._write_lock:
@@ -477,10 +709,12 @@ class Store:
                 """
                 INSERT INTO history (id, platform, title, uploader, uploader_id, duration,
                                      thumbnail, source_url, resolved_url, download_url,
-                                     resolved_at, play_kind, content_type, media_json)
+                                     resolved_at, play_kind, content_type, media_json,
+                                     source_md5)
                 VALUES (:id, :platform, :title, :uploader, :uploader_id, :duration,
                         :thumbnail, :source_url, :resolved_url, :download_url,
-                        :resolved_at, :play_kind, :content_type, :media_json)
+                        :resolved_at, :play_kind, :content_type, :media_json,
+                        :source_md5)
                 ON CONFLICT(id) DO UPDATE SET
                     platform     = excluded.platform,
                     title        = excluded.title,
@@ -494,7 +728,8 @@ class Store:
                     resolved_at  = excluded.resolved_at,
                     play_kind    = excluded.play_kind,
                     content_type = excluded.content_type,
-                    media_json   = excluded.media_json
+                    media_json   = excluded.media_json,
+                    source_md5   = excluded.source_md5
                 """,
                 row,
             )
@@ -531,6 +766,16 @@ class Store:
             self.conn.execute(
                 "UPDATE history SET local_path = ? WHERE source_url = ?",
                 (path, source_url),
+            )
+            self.conn.commit()
+
+    def set_file_md5(self, path: str, md5: str) -> None:
+        """按产物路径回填成品 MD5（历史页与 MD5 页都读它）。"""
+        if not path or not md5:
+            return
+        with self._write_lock:
+            self.conn.execute(
+                "UPDATE history SET file_md5 = ? WHERE local_path = ?", (md5, path)
             )
             self.conn.commit()
 
@@ -614,6 +859,9 @@ class Engine:
         self.dl_state = DownloadState()
         self._dl_lock = threading.Lock()
         self._dl_busy = False
+        # 直链下载的速率采样点（近几秒的 (时间, 已下字节)），见 _direct_report
+        self._rate_lock = threading.Lock()
+        self._rate_marks: list = []
         self._user = self._load_user()
 
         # 这三个路径只有安卓侧知道（应用原生库目录 + 系统下载目录），
@@ -676,6 +924,8 @@ class Engine:
             "preferred_dir": self._preferred_dir,
             "cookies_file": self.cookie_file,
             "cookies_present": bool(self.cookie_file) and os.path.isfile(self.cookie_file),
+            # 下载时是否自动改写 MD5。默认关（见 set_rewrite_md5 的说明）
+            "rewrite_md5_on_download": self.rewrite_md5_on_download,
         }
 
     def set_output_dir(self, path: str) -> dict:
@@ -787,6 +1037,15 @@ class Engine:
         if not url:
             return {"ok": False, "error": "链接为空"}
 
+        # 压根不像链接的输入在这儿就挡掉，给一句人话（原因见 looks_like_url）
+        if not looks_like_url(url):
+            return {
+                "ok": False,
+                "error": "这看起来不是一条链接。\n"
+                         "请粘贴完整的分享链接（要以 http:// 或 https:// 开头）—— "
+                         "就是作品页点「复制链接」得到的那一段。",
+            }
+
         platform = detect_platform(url)
 
         # 抖音直接走自己的链路，不再先跑一遍 yt-dlp：抖音的接口要 a_bogus 签名
@@ -837,16 +1096,26 @@ class Engine:
         rec = self._to_record(info, url)
         if not rec["id"]:
             return {"ok": False, "error": "未获取到视频 ID，解析结果不完整"}
+        # 档位全集（分辨率档 + 交给 yt-dlp 的选流表达式），供界面做下载规格选择。
+        # 界面不选（spec 为空串）时下面的下载链路行为与以前**完全一致**。
+        rec["tiers"] = ytdlp_collect_tiers(info)
 
         self.store.upsert(rec)
         # 补上历史库里已记录的本地产物路径：先下过再解析同一条时，
         # 界面要据此直接播本地文件，而不是再提示「需下载才能播放」
         rec = self._with_local_path(rec)
+        # 规格行与档位选择器必须给同一个数字。_describe_quality/_describe_size 读的是
+        # yt-dlp 自己挑的那条流（format=bv*+ba 的 requested_formats），而界面默认档是
+        # tiers[0] —— 两者未必是同一条（实测同一个 1080p 能差出两倍多），
+        # 两个数字打架会让人以为哪里算错了。所以有档位时统一以默认档为准，
+        # 档位文案里已经带了体积，filesize 不必再重复一次。
+        default_tier = rec["tiers"][0] if rec["tiers"] else None
         return {
             "ok": True,
             **rec,
-            "quality": self._describe_quality(info),
-            "filesize": self._describe_size(info),
+            "quality": default_tier["label"] if default_tier
+            else self._describe_quality(info),
+            "filesize": "" if default_tier else self._describe_size(info),
         }
 
     def _parse_douyin(self, url: str, ytdlp_err: str = "") -> dict:
@@ -922,6 +1191,16 @@ class Engine:
         if not play_url:
             raise RuntimeError("接口返回里没有可用的视频地址")
 
+        # 档位全集交给界面做「下载规格选择」；第一项即默认选中项
+        tiers = douyin_collect_tiers(video)
+        # 「当前播放的是多少分辨率」——按播放档那条去档位表里取文案。
+        # 播放档是 H.264 里最好的那条，未必等于档位表第一项（第一项可能是
+        # 分辨率更高的 H.265），所以这里按 url 反查，不能直接用 tiers[0]。
+        quality = next(
+            (t["label"] for t in tiers if t["url"] == play_url),
+            tiers[0]["label"] if tiers else "原始画质（无水印）",
+        )
+
         author = target.get("author") or {}
         cover = ((video.get("cover") or {}).get("url_list") or [""])[0]
         duration_ms = video.get("duration") or 0
@@ -937,17 +1216,23 @@ class Engine:
             "source_url": url,
             # 能直接放进播放器的那条（H.264 + 完整 mp4）
             "resolved_url": play_url,
-            # 画质最高的那条（可能是 H.265，能下不能播）
+            # 默认下载档（档位表第一项）
             "download_url": download_url,
             "resolved_at": int(time.time()),
             # 抖音直链实测支持 Range，可直接内联播放
             "play_kind": "progressive",
+            # 可选档位全集。放在 rec 上是为了让它自动出现在解析结果里
+            # （返回处是 `**self._with_local_path(rec)`），界面据此渲染选择器。
+            "tiers": tiers,
+            # 平台自报的 MD5：取默认下载档（第一档）那条。有它，界面就能在
+            # **下载之前**把 MD5 显示出来，不必等文件下来
+            "source_md5": (tiers[0].get("hash") or "") if tiers else "",
         }
         self.store.upsert(rec)
         return {
             "ok": True,
             **self._with_local_path(rec),
-            "quality": "原始画质（无水印）",
+            "quality": quality,
             "filesize": "",
         }
 
@@ -961,6 +1246,23 @@ class Engine:
         media = data.get("media") or []
         ctype = data.get("content_type") or "video"
         count = len(media)
+        # 视频才有档位；图文/图集/实况图每张只有一个地址，没有「选规格」的概念
+        tiers = data.get("tiers") or []
+        play_url = data.get("play_url") or ""
+        download_url = data.get("download_url") or ""
+
+        # 视频类作品走详情接口时，WebView 侧只把 video 对象原样带过来（video_raw），
+        # 档位与默认档的挑选在这儿做 —— 这套规则只保留一份实现
+        # （douyin_pick_tiers / douyin_collect_tiers），免得两处各算各的。
+        if data.get("video_raw"):
+            video = json.loads(data["video_raw"])
+            tiers = douyin_collect_tiers(video)
+            play_url, download_url = douyin_pick_tiers(video)
+
+        # 平台自报的 MD5：抖音每个档位都带 file_hash，取默认下载档（第一档）那条。
+        # 图文 / 图集没有档位，自然是空 —— 那类内容本来也没有「单文件 MD5」。
+        source_md5 = (tiers[0].get("hash") or "") if tiers else ""
+
         rec = {
             "id": str(data.get("id") or url),
             "platform": "抖音",
@@ -972,15 +1274,17 @@ class Engine:
             "thumbnail": data.get("thumbnail") or "",
             "source_url": url,
             # 能直接放进播放器的那条（H.264 + 完整 mp4）；图文类没有，为空
-            "resolved_url": data.get("play_url") or "",
-            # 画质最高的那条（可能是 H.265，能下不能播）
-            "download_url": data.get("download_url") or "",
+            "resolved_url": play_url,
+            # 默认下载档（档位表第一项）；图文类为空
+            "download_url": download_url,
             "resolved_at": int(time.time()),
             # 抖音直链实测返回 206 + video/mp4，支持 Range，可直接内联播放
-            "play_kind": "progressive" if (data.get("play_url") or "") else "none",
+            "play_kind": "progressive" if play_url else "none",
             "content_type": ctype,
             # 图文/图集/实况图是**多条**媒体，塞不进 resolved_url，单独存一份 JSON
             "media_json": json.dumps(media, ensure_ascii=False) if media else "",
+            "tiers": tiers,
+            "source_md5": source_md5,
         }
         self.store.upsert(rec)
         if ctype == "images":
@@ -988,7 +1292,13 @@ class Engine:
         elif ctype == "live":
             quality = f"实况图 · 共 {count} 张"
         else:
-            quality = "原始画质（无水印）"
+            # 显示「当前播放的是多少分辨率」：按播放档那条去档位表里取文案，
+            # 而不是直接取第一项 —— 第一项可能是分辨率更高的 H.265，而播放走的
+            # 是 H.264 那条，两者未必同一档。
+            quality = next(
+                (t["label"] for t in tiers if (t or {}).get("url") == play_url),
+                tiers[0]["label"] if tiers else "原始画质（无水印）",
+            )
         return {
             "ok": True,
             **self._with_local_path(rec),
@@ -1064,25 +1374,46 @@ class Engine:
 
     # ---- 下载 ----
 
-    def _download_target(self, url: str) -> str:
+    def _download_target(self, url: str, spec: dict | None = None) -> str:
         """决定真正要下载的地址。
 
-        抖音/X 的分享链接 yt-dlp 解析不了，但直链已经由备用链路拿到并入库，
-        所以下载时直接用那条直链；其他平台保持原样。
+        优先级：
+          1. 界面选中的档位（spec 里的直链）—— 用户在结果区选了规格就用它；
+          2. 备用链路已入库的默认档直链（抖音 / X）；
+          3. 原链接。
         """
+        # 选中的档位优先。这条路径是「选哪个下哪个」，不需要 yt-dlp 参与 ——
+        # 直链本身就是完整 mp4。
+        if spec and spec.get("url"):
+            return spec["url"]
+
         if detect_platform(url) not in ("抖音", "X"):
             return url
         for rec in self.store.all():
             if rec.get("source_url") == url:
-                # 备用链路拿到的直链（抖音可能是 H.265，仅供下载）
+                # 没选档位就用默认档（档位表第一项）；没有则退回可播放地址
                 return rec.get("download_url") or rec.get("resolved_url") or url
         return url
 
-    def start_download(self, url: str, index: int = 0) -> dict:
-        """开始下载。[index] 只对图文/图集有意义：0 = 全部，N = 只下第 N 张。"""
+    def start_download(self, url: str, index: int = 0, spec: str = "") -> dict:
+        """开始下载。
+
+        [index] 只对图文/图集有意义：0 = 全部，N = 只下第 N 张。
+        [spec]  界面选中的下载档位，JSON 字符串，两种形态之一：
+                  {"url": "…"}                          直链型（抖音等）
+                  {"selector": "bv*[height<=720]+ba"}   yt-dlp 型（DASH 分离流平台）
+                空字符串 = 用引擎默认档，行为与以前完全一致。
+        """
         url = (url or "").strip()
         if not url:
             return {"ok": False, "error": "链接为空"}
+
+        spec_dict: dict = {}
+        if spec:
+            try:
+                spec_dict = json.loads(spec) or {}
+            except json.JSONDecodeError:
+                return {"ok": False, "error": "下载规格参数不是合法 JSON"}
 
         with self._dl_lock:
             if self._dl_busy:
@@ -1090,45 +1421,272 @@ class Engine:
             self._dl_busy = True
 
         # url 是给界面用的：下载状态是全局的（同一时刻只有一个任务），
-        # 界面只有知道「这条状态属于哪个视频」，才不会把上一次的产物
+        # 界面只有知道「这条状态属于哪个作品」，才不会把上一次的产物
         # 拿去播当前这条解析结果。update 是合并写入，所以只在这里给一次。
         self.dl_state.update(type="starting", active=True, percent=None,
                              path="", message="", url=url, index=index)
-        threading.Thread(target=self._download_worker, args=(url, index), daemon=True).start()
+        threading.Thread(target=self._download_worker,
+                         args=(url, index, spec_dict), daemon=True).start()
         return {"ok": True}
 
     def get_download_state(self) -> dict:
         return self.dl_state.snapshot()
 
-    def _direct_output_name(self, direct_url: str) -> str:
-        """给「直链下载」拼一个具体文件名。
+    def _direct_stem(self, rec: dict | None) -> str:
+        """直链下载用的文件名主干 —— 不含扩展名，也还没转义 `%`。
 
         走直链时 yt-dlp 用的是通用提取器，拿不到任何元数据，%(title)s /
         %(id)s 只能从 URL 里猜：抖音会变成一串 a=6383&br=6185 查询参数，
         X 的 video.twimg.com 会变成内部文件名。所以直接用库里存的标题和 id。
         """
+        title = ((rec or {}).get("title") or "").strip()
+        if not title:
+            return ""
+        vid = ((rec or {}).get("id") or "").strip()
+        # 预算必须**先给「 [id].%(ext)s」留够**，剩下的才给标题。
+        # 原先是 MAX_NAME_BYTES - 8，而「 [19 位 id].mp4」要 26 字节 ——
+        # 留少了，长标题时 [id] 会被截掉，连右括号都不剩（实测文件名卡在
+        # 204 字节，结尾是 `... @DOU+小助手 [7692598.mp4`）。
+        # [id] 是保证文件名唯一的那部分，丢了会让两个标题相近的视频重名，
+        # 后一个会被 yt-dlp 当成「已下载」直接跳过。
+        suffix = f" [{vid}].%(ext)s" if vid else ".%(ext)s"
+        budget = max(16, MAX_NAME_BYTES - len(suffix.encode("utf-8")))
+        # 标题超长时用和图片同一套规则：先丢末尾 #话题，再按字节裁加省略号
+        safe = self._clip_title(title, budget)
+        if not safe:
+            safe = vid or "douyin"
+        return f"{safe} [{vid}]" if vid else safe
+
+    def _direct_output_name_for(self, rec: dict | None) -> str:
+        """按一条历史记录拼「直链下载」用的文件名模板（交给 yt-dlp 填扩展名）。"""
+        stem = self._direct_stem(rec)
+        if not stem:
+            return ""
+        # 标题里若含 %，会被 yt-dlp 当模板再解析一次，转义成字面量
+        return stem.replace("%", "%%") + ".%(ext)s"
+
+    def _direct_output_name(self, direct_url: str) -> str:
+        """按 URL 反查历史记录，再拼文件名。
+
+        只对「引擎自己选的那条直链」（默认档）有效 —— 用户在界面上选了别的档位时
+        那个 URL 不在库里，反查不到；那种情况由 _download_worker 直接用记录来拼，
+        否则文件名会退化成 URL 片段（实测就是 `...a=0&ch=5&...&q.mp4` 这样）。
+        """
         for rec in self.store.all():
             if direct_url in (rec.get("download_url"), rec.get("resolved_url")):
-                title = (rec.get("title") or "").strip()
-                if not title:
-                    return ""
-                vid = (rec.get("id") or "").strip()
-                # 预算必须**先给「 [id].%(ext)s」留够**，剩下的才给标题。
-                # 原先是 MAX_NAME_BYTES - 8，而「 [19 位 id].mp4」要 26 字节 ——
-                # 留少了，长标题时 [id] 会被截掉，连右括号都不剩（实测文件名卡在
-                # 204 字节，结尾是 `... @DOU+小助手 [7692598.mp4`）。
-                # [id] 是保证文件名唯一的那部分，丢了会让两个标题相近的视频重名，
-                # 后一个会被 yt-dlp 当成「已下载」直接跳过。
-                suffix = f" [{vid}].%(ext)s" if vid else ".%(ext)s"
-                budget = max(16, MAX_NAME_BYTES - len(suffix.encode("utf-8")))
-                # 标题超长时用和图片同一套规则：先丢末尾 #话题，再按字节裁加省略号
-                safe = self._clip_title(title, budget)
-                # 标题里若含 %，会被 yt-dlp 当模板再解析一次，转义成字面量
-                safe = safe.replace("%", "%%")
-                if not safe:
-                    safe = vid or "douyin"
-                return f"{safe} [{vid}].%(ext)s" if vid else f"{safe}.%(ext)s"
+                return self._direct_output_name_for(rec)
         return ""
+
+    # ---- 直链分块并行下载 ----
+
+    def _direct_output_path(self, target: str, rec: dict | None) -> str:
+        """直链下载的落盘路径；拼不出文件名时返回空串。
+
+        命名规则与 yt-dlp 那条路一致（库里的标题 + [id]），重名同样另存一份
+        `(1)/(2)…`。这一步必须自己做：yt-dlp 碰到同名文件是直接跳过，而这条路由
+        我们自己写盘，不处理就会把上一份**覆盖**掉。
+        """
+        if not rec:
+            rec = next(
+                (r for r in self.store.all()
+                 if target in (r.get("download_url"), r.get("resolved_url"))),
+                None,
+            )
+        stem = self._direct_stem(rec)
+        if not stem:
+            return ""
+        for n in range(100):
+            tag = f" ({n})" if n else ""
+            cand = os.path.join(self._output_dir, f"{stem}{tag}.mp4")
+            if not os.path.exists(cand):
+                return cand
+        return os.path.join(self._output_dir, f"{stem}.mp4")
+
+    # 算瞬时速率用的滑动窗口长度（秒）。取 4 秒：再短会被一次卡顿带得跳，
+    # 再长就又退回成累计平均值了。
+    _RATE_WINDOW = 4.0
+
+    def _direct_report(self, got: int, total: int, started: float) -> None:
+        """把「已下多少」和**当前**速率写进下载状态。
+
+        进度必须自己报：引擎里原来只有 yt-dlp 的 progress_hooks 在更新界面上的
+        进度条，自己写的下载器不补这一步，界面会一直停在 0，看着像卡死了。
+
+        速率用近几秒的**滑动窗口**算，而不是「已下字节 / 总耗时」那个累计平均值：
+        累计平均会被中途一次卡顿永久拉低，之后只能慢慢往回爬 —— 用户看到的就是
+        「一开始几 MB、突然掉到几十 KB、再慢慢涨回几 MB」，像速度在乱跳
+        （实测被反馈上来的就是这个现象）。窗口速率反映的是「此刻多快」。
+        """
+        now = time.time()
+        with self._rate_lock:
+            marks = self._rate_marks
+            marks.append((now, got))
+            # 只留窗口内的采样点；至少留两个，否则算不出时间跨度
+            while len(marks) > 2 and marks[0][0] < now - self._RATE_WINDOW:
+                marks.pop(0)
+            t0, g0 = marks[0]
+        span = now - t0
+        if span > 0.2:
+            # 窗口够长就用窗口内的增量算「此刻多快」。这段时间没进展就是 0 ——
+            # 界面把 0 显示成「不显示速度」（formatSpeed 对 0 返回空串），
+            # 比报一个正在缓慢下滑 / 回升的累计平均值诚实。
+            speed = max(0, int((got - g0) / span))
+        else:
+            # 刚开始，窗口还没跨度，退回累计平均，总比显示 0 强
+            speed = int(got / max(0.001, now - started))
+        self.dl_state.update(
+            type="progress", active=True,
+            percent=round(got / total * 100, 1) if total else None,
+            downloaded=got, total=total, speed=speed,
+            eta=int((total - got) / speed) if total and speed else None,
+        )
+
+    def _download_direct(self, target: str, path: str) -> None:
+        """直链下载：HTTP Range 分块并行。
+
+        为什么不让 yt-dlp 代劳：直链是「一个完整的 mp4」，yt-dlp 只会用通用
+        提取器走**单连接**整文件拉，引擎里的 concurrent_fragment_downloads
+        对整文件传输完全不起作用。实测抖音 CDN 支持 Range（Accept-Ranges: bytes、
+        206 且带 Content-Range），分块并行能把带宽吃满。
+
+        服务端忽略 Range（回 200）或给不出总长度时退回单连接 —— 这条回退必须有：
+        那种情况下响应体是整个文件，仍按分块偏移去写会把文件写坏。
+        """
+        # 每次下载都从干净的速率采样开始：留着上一次的采样点会把这次的均速算歪
+        with self._rate_lock:
+            self._rate_marks.clear()
+        headers = {"User-Agent": _BROWSER_UA}
+        if "douyinvod.com" in target:
+            # 抖音直链来自浏览器监听，其 CDN 会校验 Referer，不带会被拒
+            headers["Referer"] = "https://www.douyin.com/"
+        eng = self.defaults.get("engine") or {}
+        timeout = int(eng.get("socket_timeout") or 20)
+        workers = max(1, int(eng.get("direct_threads") or 6))
+
+        try:
+            total, ranged = self._probe_range(target, headers, timeout)
+            if ranged and total > 0 and workers > 1:
+                self._ranged_get(target, path, total, headers, timeout, workers)
+            else:
+                print(f"[engine] 直链不支持分块（总长度 {total}），改用单连接")
+                self._stream_get(target, path, headers, timeout)
+        except Exception:
+            # 失败不留半截文件：那东西留在磁盘上，用户下次下载还会撞进重名逻辑
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            raise
+
+    @staticmethod
+    def _probe_range(target: str, headers: dict, timeout: int) -> tuple:
+        """问一次「总长度」和「支不支持 Range」。
+
+        用带 Range 的 GET 而不是 HEAD：不少 CDN 对 HEAD 不给 Content-Range，
+        而 `Range: bytes=0-0` 一定会回 `Content-Range: bytes 0-0/<总长>`。
+        """
+        req = urllib.request.Request(target, headers={**headers, "Range": "bytes=0-0"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status != 206:
+                    return 0, False
+                m = re.match(
+                    r"bytes\s+\d+-\d+/(\d+)", resp.headers.get("Content-Range") or ""
+                )
+                return (int(m.group(1)) if m else 0), True
+        except Exception as exc:  # noqa: BLE001
+            print(f"[engine] Range 探测失败，改用单连接：{exc}")
+            return 0, False
+
+    def _stream_get(self, target: str, path: str, headers: dict, timeout: int) -> None:
+        """单连接整文件下载（不支持分块时的回退）。"""
+        req = urllib.request.Request(target, headers=headers)
+        started = time.time()
+        got = 0
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            length = resp.headers.get("Content-Length") or ""
+            # 服务端不给长度时 total 为 0，进度就只报「已下多少」（percent=None）
+            total = int(length) if length.isdigit() else 0
+            with open(path, "wb") as f:
+                while True:
+                    buf = resp.read(_DIRECT_READ)
+                    if not buf:
+                        break
+                    f.write(buf)
+                    got += len(buf)
+                    self._direct_report(got, total, started)
+
+    def _ranged_get(self, target: str, path: str, total: int,
+                    headers: dict, timeout: int, workers: int) -> None:
+        """把 total 个字节切成 workers 块，各线程按自己的偏移并行写。"""
+        # 先把文件按总长度撑开：各线程往自己的偏移上写，不预分配的话，
+        # 先写完的那个线程会把文件截断，后面写的偏移就全丢了。
+        with open(path, "wb") as f:
+            f.truncate(total)
+
+        spans = []
+        span_size = max(_DIRECT_READ, -(-total // workers))
+        start = 0
+        while start < total:
+            end = min(start + span_size, total) - 1
+            spans.append((start, end))
+            start = end + 1
+
+        lock = threading.Lock()
+        abort = threading.Event()
+        state = {"got": 0, "err": None}
+        started = time.time()
+
+        def worker(span: tuple) -> None:
+            s, e = span
+            if abort.is_set():
+                return
+            try:
+                req = urllib.request.Request(
+                    target, headers={**headers, "Range": f"bytes={s}-{e}"}
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    if resp.status != 206:
+                        # 探测说支持、真拉时又回 200：此时响应体是整个文件，
+                        # 照偏移写会写坏，宁可整个失败
+                        raise RuntimeError("服务端未按 Range 返回（期望 206）")
+                    # 每个线程开自己的句柄：共用一个 file 对象时各线程的
+                    # seek 与 write 会互相穿插，写出来的内容会错位
+                    f = open(path, "r+b")
+                    try:
+                        f.seek(s)
+                        pos = s
+                        while pos <= e:
+                            buf = resp.read(min(_DIRECT_READ, e - pos + 1))
+                            if not buf:
+                                break
+                            f.write(buf)
+                            pos += len(buf)
+                            with lock:
+                                state["got"] += len(buf)
+                                got = state["got"]
+                            self._direct_report(got, total, started)
+                    finally:
+                        f.close()
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    if state["err"] is None:
+                        state["err"] = exc
+                abort.set()
+
+        threads = [threading.Thread(target=worker, args=(sp,), daemon=True)
+                   for sp in spans]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        if state["err"] is not None:
+            raise state["err"]
+        # 文件是被 truncate 撑开的，所以大小恒等于 total —— 只有累计写入的字节数
+        # 才能证明每一块都真写全了
+        if state["got"] != total:
+            raise RuntimeError(f"分块下载不完整：{state['got']}/{total}")
 
     def _on_progress(self, d: dict) -> None:
         status = d.get("status")
@@ -1341,7 +1899,8 @@ class Engine:
                 return cand_tmpl
         return template
 
-    def _download_worker(self, url: str, index: int = 0) -> None:
+    def _download_worker(self, url: str, index: int = 0,
+                         spec: dict | None = None) -> None:
         logger = _Logger()
         try:
             # 图文 / 图集 / 实况图走单独路径
@@ -1352,12 +1911,35 @@ class Engine:
                 self._download_media_list(url, rec, index)
                 return
 
-            target = self._download_target(url)
+            target = self._download_target(url, spec)
+
+            # 直链（抖音 / X 的作品地址）：自己用 Range 分块并行下。
+            # 交给 yt-dlp 只会走单连接整文件拉，concurrent_fragment_downloads
+            # 对整文件传输不起作用 —— 这是这条路上唯一能真正提速的口子。
+            # 拼不出文件名（库里没有这条记录）时不动它，退回 yt-dlp，行为与以前一致。
+            if any(host in target for host in DIRECT_URL_HOSTS):
+                direct_path = self._direct_output_path(target, rec)
+                if direct_path:
+                    self._download_direct(target, direct_path)
+                    self._finish_download(url, direct_path)
+                    return
+
             opts = self._base_opts(target)
+            # yt-dlp 型档位：把用户选的规格翻译成格式选择表达式。
+            # DASH 平台（YouTube / B站）拿不到「一条完整直链」，只能这样选。
+            # 直链型档位不走这里 —— 它的地址已经在上一行由 _download_target 定好了。
+            selector = (spec or {}).get("selector")
+            if selector:
+                opts["format"] = selector
             dl = self.defaults.get("download") or {}
             eng = self.defaults.get("engine") or {}
             template = dl.get("filename_template") or "%(title)s [%(id)s].%(ext)s"
-            if any(host in target for host in DIRECT_URL_HOSTS):
+            if spec and spec.get("url"):
+                # 界面选了档位：目标是一条裸直链，而它**不在库里**（库里存的是默认
+                # 档），按 URL 反查必然查不到 → 文件名会退化成 URL 片段。所以直接用
+                # 这条记录来拼（rec 在函数开头已按 source_url 查好）。
+                template = self._direct_output_name_for(rec) or template
+            elif any(host in target for host in DIRECT_URL_HOSTS):
                 template = self._direct_output_name(target) or template
 
             opts.update({
@@ -1383,13 +1965,10 @@ class Engine:
                 info = ydl.extract_info(target, download=True) or {}
                 path = self._final_path(info, ydl)
 
-            # 把产物路径记进历史：历史页据此提供「播放本地文件」——
-            # 对 B站/YouTube 这类纯 DASH 站点，这是唯一能看的方式
-            if path:
-                self.store.set_local_path(url, path)
-
-            self.dl_state.update(type="done", active=False, path=path,
-                                 message="", percent=100.0)
+            # 收尾：算 MD5（开关打开就先改写），再把**最终产物**的路径记进历史 ——
+            # 历史页据此提供「播放本地文件」；对 B站/YouTube 这类纯 DASH 站点，
+            # 那是唯一能看的方式
+            self._finish_download(url, path)
         except Exception as exc:  # noqa: BLE001
             raw = logger.last_error or f"{type(exc).__name__}: {exc}"
             self.dl_state.update(type="error", active=False,
@@ -1397,6 +1976,246 @@ class Engine:
         finally:
             with self._dl_lock:
                 self._dl_busy = False
+
+    # ---- MD5 ----
+
+    @property
+    def rewrite_md5_on_download(self) -> bool:
+        return bool((self._user or {}).get("rewrite_md5_on_download") or False)
+
+    def set_rewrite_md5(self, enabled: bool) -> dict:
+        """设置「下载时自动改写 MD5」。
+
+        默认关：改过的文件 MD5 与平台自报值对不上（那正是它的目的），但这是
+        「改变文件内容」的动作，该由用户显式打开，而不是默默替他做掉。
+        """
+        self._user["rewrite_md5_on_download"] = bool(enabled)
+        self._save_user()
+        return self.get_settings()
+
+    def rewrite_md5(self, path: str, dst: str = "") -> dict:
+        """把文件的 MD5 改掉。dst 为空 = 原地改写；dst 非空 = **另存副本**（原件不动）。
+
+        视频走 ffmpeg 无损重封装（-c copy + 随机 comment 元数据）。为什么不用「末尾
+        追加几个字节」那种便宜做法：追加虽然瞬间完成，但产出的是**非规范容器**
+        （尾部挂着游离数据），个别播放器 / 相册 / 剪辑软件会拒收。`-c copy` 不重编码、
+        画质零损失，产出的仍是一份完全规范的 mp4。代价是整个文件要重写一遍
+        （大文件几秒到十几秒、磁盘瞬时占用翻倍）—— 这是选「最稳」那条路的固有成本。
+
+        图片走不了这条路：实测 jpg / png / webp 用 `-c copy -metadata comment=…`
+        产出的字节与原件**完全相同**，MD5 一点没变（这些容器里没有 moov-udta 那样
+        可写元数据的位置）。所以图片改成在末尾追加一段标记：解码器读到 EOI / IEND
+        就收工，尾部多出的字节不影响解码，而字节确实变了 —— 这正是需求要的。
+
+        任何一步失败都**原样保留用户的文件**，并把原因如实返回：绝不能留下半成品
+        把文件毁了。
+        """
+        if not path or not os.path.isfile(path):
+            return {"ok": False, "error": "文件不存在，可能已被移动或删除"}
+        target = dst or path
+        # 随机串才是文件字节真正变化的原因
+        stamp = hashlib.md5(os.urandom(16)).hexdigest()[:16]
+        try:
+            before = file_md5(path)
+            if os.path.splitext(target)[1].lower() in IMAGE_EXTS:
+                self._rewrite_image_md5(path, target, stamp)
+            else:
+                self._remux_video_md5(path, target, stamp)
+            after = file_md5(target)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"改写失败：{exc}"}
+        return {"ok": True, "before": before, "after": after,
+                "changed": before != after, "path": target}
+
+    def _remux_video_md5(self, src: str, dst: str, stamp: str) -> None:
+        """ffmpeg 无损重封装。dst 允许等于 src（原地改写）。失败抛异常、不留 dst。"""
+        if not self._ffmpeg or not os.path.isfile(self._ffmpeg):
+            raise RuntimeError("这一端没有可用的 ffmpeg，改不了 MD5")
+        # 扩展名要留给 ffmpeg 判断容器：xx.mp4 -> xx.md5tmp.mp4
+        ext = os.path.splitext(dst)[1].lower()
+        tmp = f"{dst}.md5tmp{ext}"
+        cmd = [
+            self._ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", src, "-c", "copy",
+            "-metadata", f"comment=ytdlp-md5-{stamp}",
+            tmp,
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=600)
+            if proc.returncode != 0:
+                err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+                raise RuntimeError(err[-200:] or f"ffmpeg 退出码 {proc.returncode}")
+            if not os.path.isfile(tmp) or os.path.getsize(tmp) == 0:
+                raise RuntimeError("ffmpeg 没有产出文件")
+            # 同目录内替换是原子操作：中途断电也不会留下一个写坏的成品
+            os.replace(tmp, dst)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+
+    def _rewrite_image_md5(self, src: str, dst: str, stamp: str) -> None:
+        """图片：照抄一份，再往里加一段标记写到 dst。失败不留半个文件。
+
+        三种加法（结果都是**规范**图片，只是插的位置不同）：
+          png      → 在 IEND 之前插一个标准 tEXt 文本块
+          jpg/jpeg → 在 SOI（有 APP0 就排它后面）之后插一个标准 COM 注释段
+          其余格式 → 末尾追加字节（webp / gif / heic 没有这么好插的位置，而它们
+                     的解码器读到结束标记就收工，尾部字节不影响解码）
+
+        为什么图片不像视频那样直接追加字节：实测追加会让标准工具报
+        「Invalid PNG signature / Decoding error」—— png 的解析器会去读尾部多出来的
+        那截。png / jpg 本来就有现成的元数据位可插，那就正经插进去。
+        """
+        ext = os.path.splitext(src)[1].lower()
+        marker = f"ytdlp-md5-{stamp}".encode("utf-8")
+        tmp = f"{dst}.md5tmp{os.path.splitext(dst)[1].lower()}"
+        try:
+            with open(src, "rb") as fin, open(tmp, "wb") as fout:
+                if ext == ".png" and self._png_insert(fin, fout, marker):
+                    pass
+                elif ext in (".jpg", ".jpeg") and self._jpeg_insert(fin, fout, marker):
+                    pass
+                else:
+                    shutil.copyfileobj(fin, fout, _DIRECT_READ)
+                    fout.write(b"\n<!-- " + marker + b" -->\n")
+            os.replace(tmp, dst)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+
+    @staticmethod
+    def _png_insert(fin, fout, marker: bytes) -> bool:
+        """在 IHDR 之后插一个 tEXt 块。结构认不出来就返回 False（调用方退回追加）。
+
+        为什么插在头部而不是 IEND 之前：实测把 tEXt 放在 IDAT **之后**，ffmpeg 会报
+        「chunk too big」并判为解码失败 —— 流式解码器对 IDAT 之后的块处理得很糙。
+        IHDR 一定是第一个块（png 规范硬性要求），所以插入点在文件头就能算出来，
+        连「从尾部找 IEND」都不必做。
+        """
+        head = fin.read(8)
+        if head != b"\x89PNG\r\n\x1a\n":
+            return False
+        len_raw = fin.read(4)
+        ctype = fin.read(4)
+        if ctype != b"IHDR":
+            return False
+        ihdr_len = int.from_bytes(len_raw, "big")
+        fout.write(head + len_raw + ctype)
+        _copy_partial(fin, fout, ihdr_len + 4)  # IHDR 的数据 + 它自己的 CRC
+        # 块结构：长度(4) | 类型(4) | 数据 | CRC(4)。**长度只算数据那一段**（不含
+        # 类型名，也不含长度自己），CRC 则覆盖「类型 + 数据」—— 这两条不一样，
+        # 混了就会让解析器读串（实测把长度算成「类型+数据」时 ffmpeg 报 chunk too big）
+        payload = b"Comment\x00" + marker
+        chunk = b"tEXt" + payload
+        fout.write(len(payload).to_bytes(4, "big") + chunk
+                   + (zlib.crc32(chunk) & 0xFFFFFFFF).to_bytes(4, "big"))
+        shutil.copyfileobj(fin, fout, _DIRECT_READ)
+        return True
+
+    @staticmethod
+    def _jpeg_insert(fin, fout, marker: bytes) -> bool:
+        """在 SOI 之后插一个 COM 注释段。不是 JPEG 就返回 False（调用方退回追加）。"""
+        head = fin.read(2)
+        if head != b"\xff\xd8":
+            return False
+        fout.write(head)
+        # JFIF 要求 APP0 紧跟 SOI，所以有 APP0 就让它留在前面，COM 插在它后面
+        nxt = fin.read(2)
+        app0 = b""
+        if len(nxt) == 2 and nxt[0:1] == b"\xff" and nxt[1:2] == b"\xe0":
+            seg_len = int.from_bytes(fin.read(2), "big")
+            app0 = nxt + seg_len.to_bytes(2, "big") + fin.read(max(seg_len - 2, 0))
+        payload = marker[:65533]  # 段长字段只有 2 字节，而且含它自己那 2 字节
+        fout.write(app0)
+        fout.write(b"\xff\xfe" + (len(payload) + 2).to_bytes(2, "big") + payload)
+        if not app0:
+            # 那两字节不是 APP0 的开头，得原样补回去（只有在文件异常截断时才会走到）
+            fout.write(nxt)
+        shutil.copyfileobj(fin, fout, _DIRECT_READ)
+        return True
+
+    def _finish_download(self, url: str, path: str) -> None:
+        """下载收尾：算 MD5 →（开关打开则）改写 → 记路径 → 报完成。
+
+        顺序不能换：写进库的 local_path 必须是**最终成品**，否则历史页放的是那份
+        已经被替换掉的旧文件，播放会失败、看着像下载坏了。
+        """
+        before = after = ""
+        try:
+            if path and os.path.isfile(path):
+                before = file_md5(path)
+                if self.rewrite_md5_on_download:
+                    self.dl_state.update(type="processing", active=True,
+                                         percent=100.0, message="正在改写 MD5…")
+                    r = self.rewrite_md5(path)
+                    if r.get("ok"):
+                        after = r["after"]
+                    else:
+                        # 改写失败不该把整个下载判成失败：文件本身已经下来了，
+                        # 如实记一笔日志就好
+                        print(f"[engine] 改写 MD5 失败：{r.get('error')}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[engine] 算 MD5 失败：{exc}")
+
+        self.store.set_local_path(url, path)
+        # 库里存「最终那个文件」的 MD5：改过就存改后的，没改或改失败就是原值
+        self.store.set_file_md5(path, after or before)
+        self.dl_state.update(type="done", active=False, path=path, message="",
+                             percent=100.0, md5=before, md5_after=after)
+
+    def list_downloads(self) -> list[dict]:
+        """已下载、且文件还躺在原地的**文件**记录 —— MD5 页的数据源。
+
+        只列文件、不列目录：图文/图集的产物是一个文件夹，没有「单一文件的 MD5」
+        这一说（用户要的也只是视频）。
+        """
+        out = []
+        for rec in self.store.all():
+            path = (rec.get("local_path") or "").strip()
+            if not path or not os.path.isfile(path):
+                continue
+            out.append({
+                "id": rec.get("id") or "",
+                "title": rec.get("title") or "",
+                "platform": rec.get("platform") or "",
+                "path": path,
+                "filename": os.path.basename(path),
+                "size": os.path.getsize(path),
+                "source_md5": rec.get("source_md5") or "",
+                "file_md5": rec.get("file_md5") or "",
+            })
+        return out
+
+    def get_file_md5(self, path: str) -> dict:
+        """按需现算某个文件的 MD5。
+
+        不读库里的 file_md5：用户可能在文件管理器里动过这个文件（改名、替换、
+        编辑），缓存下来的值会变成谎话。
+        """
+        if not path or not os.path.isfile(path):
+            return {"ok": False, "error": "文件不存在，可能已被移动或删除"}
+        try:
+            return {"ok": True, "path": path, "md5": file_md5(path),
+                    "size": os.path.getsize(path)}
+        except OSError as exc:
+            return {"ok": False, "error": f"读文件失败：{exc}"}
+
+    def edit_file_md5_to(self, src: str, dst: str) -> dict:
+        """另存副本式改写：原件全程不动，改后成品写到 dst。
+
+        src 是「用户从相册/文件里挑中的东西」在缓存里的临时副本，它不在历史库里，
+        所以这里不回填任何记录。
+
+        只提供这一条对外接口：改自己的产物也走「另存副本」，用户的原文件永远不动
+        （in-place 那条路留给下载收尾，见 _finish_download）。
+        """
+        return self.rewrite_md5(src, dst)
 
     @staticmethod
     def _final_path(info: dict, ydl) -> str:
@@ -1566,12 +2385,33 @@ def set_cookies_file(path: str) -> str:
     return json.dumps(_get().set_cookies_file(path), ensure_ascii=False)
 
 
+def set_rewrite_md5(enabled: bool) -> str:
+    """设置「下载时自动改写 MD5」，返回最新设置。"""
+    return json.dumps(_get().set_rewrite_md5(enabled), ensure_ascii=False)
+
+
+def list_downloads() -> str:
+    """已下载、且文件还在本地的记录（含平台自报 MD5 与实际 MD5）—— MD5 页用。"""
+    return json.dumps(_get().list_downloads(), ensure_ascii=False)
+
+
+def get_md5(path: str) -> str:
+    """现算某个文件的 MD5（不读库里的缓存值）。"""
+    return json.dumps(_get().get_file_md5(path), ensure_ascii=False)
+
+
+def edit_md5_to(src: str, dst: str) -> str:
+    """另存副本式改写 MD5（原件全程不动），返回改前 / 改后的值。"""
+    return json.dumps(_get().edit_file_md5_to(src, dst), ensure_ascii=False)
+
+
 def parse_url(url: str) -> str:
     return json.dumps(_get().parse_url(url), ensure_ascii=False)
 
 
-def start_download(url: str, index: int = 0) -> str:
-    return json.dumps(_get().start_download(url, index), ensure_ascii=False)
+def start_download(url: str, index: int = 0, spec: str = "") -> str:
+    """[spec] 是界面选中的下载档位（JSON 字符串）；空串表示用引擎默认档。"""
+    return json.dumps(_get().start_download(url, index, spec), ensure_ascii=False)
 
 
 def get_download_state() -> str:

@@ -14,6 +14,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ytdlp.android.BuildConfig
 import com.ytdlp.android.engine.Download
+import com.ytdlp.android.engine.DownloadItem
 import com.ytdlp.android.engine.Engine
 import com.ytdlp.android.engine.Settings
 import com.ytdlp.android.engine.UpdateChecker
@@ -67,6 +68,49 @@ data class SettingsUi(
     val notice: String? = null,
 )
 
+/** MD5 流程的三个阶段：选媒体 → 详情 → 结果。 */
+enum class Md5Stage { Entry, Detail, Result }
+
+/** 详情页 / 结果页要展示的那一份媒体。 */
+data class Md5FileUi(
+    /** 详情页里是缓存中的原件副本；结果页里是改后的成品 */
+    val path: String,
+    /** video / image */
+    val kind: String,
+    val name: String,
+    val size: Long,
+    val durationMs: Long,
+    val width: Int,
+    val height: Int,
+    /** 详情页 = 原件的 MD5；结果页 = 改后的 MD5 */
+    val md5: String,
+    /** 改之前的 MD5。只有结果页非空 */
+    val md5Before: String = "",
+    /** 改之前的大小。结果页要把旧值划掉、新值跟在后面，所以得记住旧的那一份 */
+    val sizeBefore: Long = 0,
+)
+
+/**
+ * MD5 页的状态：一条「选媒体 → 详情 → 结果」的流程，外加一份「已下载视频」次要列表。
+ *
+ * 流程状态放 ViewModel 而不是界面里：一是改写要等几秒到十几秒，转屏或界面重建
+ * 不该把它打断；二是「选中的是哪一份、改到哪一步了」本来就不属于某一屏的临时状态。
+ */
+data class Md5Ui(
+    val loading: Boolean = true,
+    /** 已下载、且文件还躺在原地的产物。点一条会进同一条流程 */
+    val items: List<DownloadItem> = emptyList(),
+    val stage: Md5Stage = Md5Stage.Entry,
+    val picked: Md5FileUi? = null,
+    val result: Md5FileUi? = null,
+    /** 复制 / 探测 / 改写 / 保存进行中，界面据此禁用按钮 */
+    val working: Boolean = false,
+    /** 出错说明（读不到文件、改写失败…），界面直接显示原文 */
+    val error: String = "",
+    /** 一次性提示（如「已保存到 …」），显示后由界面调 consumeMd5Notice 清掉 */
+    val notice: String? = null,
+)
+
 /** 检查更新的状态。失败原因由 UpdateChecker 侧翻译成中文，界面直接用。 */
 sealed interface UpdateUi {
     data object Idle : UpdateUi
@@ -88,6 +132,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _settings = MutableStateFlow(SettingsUi())
     val settings: StateFlow<SettingsUi> = _settings.asStateFlow()
+
+    private val _md5 = MutableStateFlow(Md5Ui())
+    val md5: StateFlow<Md5Ui> = _md5.asStateFlow()
 
     private val _download = MutableStateFlow(
         Download("idle", false, null, "", "", 0, 0, 0.0, null)
@@ -255,20 +302,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- 下载 ----
 
-    fun startDownload() {
-        val video = (_parse.value as? ParseUi.Done)?.video ?: return
-        startDownload(video)
-    }
-
     /**
      * 发起下载。
      *
      * @param index 只对图文/图集有意义：0 = 全部，N = 只下第 N 张。
+     * @param spec  用户在结果区选中的下载档位（Tier.specJson）。
+     *              空串表示用引擎默认档（档位表第一项）。历史记录里的条目没有档位
+     *              （档位是解析期的信息、不落库），所以走历史页下载时它必然是空串。
      */
-    fun startDownload(video: Video, index: Int = 0) {
+    fun startDownload(video: Video, index: Int = 0, spec: String = "") {
         viewModelScope.launch {
             val error = withContext(Dispatchers.IO) {
-                runCatching { Engine.startDownload(ctx, video.sourceUrl, index) }
+                runCatching { Engine.startDownload(ctx, video.sourceUrl, index, spec) }
                     .getOrElse { "引擎异常：${it.message}" }
             }
             if (error != null) {
@@ -360,22 +405,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * 只写一边，相册照样显示成普通图片。抖音下载的实况图就是这么做的
      * （它的图片和视频两条记录里都带着这个字段）。
      *
+     * 图片扩展名**不能只认 `.jpg`**：实况图的图片扩展名是从抖音地址里推出来的，
+     * 抖音给的是 `.jpg` 还是 `.jpeg` 并不固定（实测同一个账号下两种都有）。
+     * 原先这里写死 `== "jpg"`，于是拿到 `.jpeg` 的实况图会被整条跳过 ——
+     * 表现就是「相册里只剩一张静态图 + 一段视频」，而且**不报错**（静默失效）。
+     * 所以这里放开成 JPEG 家族 + 抖音地址模板里出现过的 webp。
+     *
      * 这个字段名是厂商私有的，换品牌未必叫这个，所以整段是「能写就写」：
      * 写不上就安静跳过 —— 文件本身该在还在，不影响任何别的功能。
      */
     private fun markLivePhotos(dir: File) {
         runCatching {
             val stamp = "${System.currentTimeMillis()}000000000000000"
+            val imageExts = setOf("jpg", "jpeg", "webp", "png")
             dir.listFiles()
-                ?.filter { it.isFile && it.extension.lowercase() == "jpg" }
-                ?.forEach { jpg ->
-                    val mp4 = File(dir, jpg.nameWithoutExtension + ".mp4")
+                ?.filter { it.isFile && it.extension.lowercase() in imageExts }
+                ?.forEach { image ->
+                    // 配对靠「同名」：图片与那段动效视频同名，只有扩展名不同
+                    val mp4 = File(dir, image.nameWithoutExtension + ".mp4")
                     if (!mp4.exists()) return@forEach
-                    val jpgId = mediaId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, jpg)
+                    val imageId = mediaId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, image)
                         ?: return@forEach
                     val mp4Id = mediaId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, mp4)
                         ?: return@forEach
-                    putLivePhoto(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, jpgId, stamp)
+                    putLivePhoto(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, imageId, stamp)
                     putLivePhoto(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, mp4Id, stamp)
                 }
         }
@@ -522,6 +575,171 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun consumeNotice() {
         _settings.value = _settings.value.copy(notice = null)
+    }
+
+    // ---- MD5 ----
+
+    /** 刷新已下载产物列表。切到 MD5 页时调一次即可（不必在启动时白做一遍）。 */
+    fun refreshDownloads() {
+        viewModelScope.launch {
+            val items = withContext(Dispatchers.IO) {
+                runCatching { Engine.downloads(ctx) }.getOrDefault(emptyList())
+            }
+            _md5.value = _md5.value.copy(loading = false, items = items)
+        }
+    }
+
+    /**
+     * 从相册 / 文件选择器选中的一项开始处理。
+     *
+     * 三步都在 IO 线程上做：复制整份文件、读时长分辨率、算一次 MD5 —— 相册里一段
+     * 几十秒的 4K 视频就够让主线程卡住。
+     */
+    fun pickMd5(uri: Uri) {
+        loadIntoEditor { Md5Media.pickFromUri(ctx, uri) }
+    }
+
+    /** 从「已下载」列表里点的一条开始处理。同样先复制进缓存，原文件不动。 */
+    fun pickMd5FromPath(path: String) {
+        loadIntoEditor { Md5Media.pickFromFile(ctx, File(path)) }
+    }
+
+    /**
+     * 复制 → 探测 → 算原 MD5，成功后进详情页。
+     *
+     * [pick] 是个「把选中项变成缓存副本」的动作，两条入口（相册选择器 / 已下载列表）
+     * 只在这件事上不同，后面的处理完全一样，所以两条入口共用这一段。
+     */
+    private fun loadIntoEditor(pick: () -> Md5Media.Picked) {
+        if (_md5.value.working) return
+        viewModelScope.launch {
+            _md5.value = _md5.value.copy(working = true, error = "", notice = null)
+            val r = withContext(Dispatchers.IO) {
+                runCatching {
+                    val picked = pick()
+                    val info = Md5Media.probe(picked.file, picked.kind)
+                    val md5 = Engine.fileMd5(ctx, picked.file.absolutePath)
+                    Md5FileUi(
+                        path = picked.file.absolutePath,
+                        kind = picked.kind,
+                        name = picked.file.name,
+                        size = info.size,
+                        durationMs = info.durationMs,
+                        width = info.width,
+                        height = info.height,
+                        md5 = if (md5.ok) md5.md5 else "",
+                    )
+                }
+            }
+            _md5.value = r.fold(
+                onSuccess = {
+                    _md5.value.copy(
+                        working = false, error = "", stage = Md5Stage.Detail,
+                        picked = it, result = null,
+                    )
+                },
+                onFailure = {
+                    _md5.value.copy(working = false, error = it.message ?: "读不到这个文件")
+                },
+            )
+        }
+    }
+
+    /**
+     * 改写 MD5：原件（picked.path，即缓存里那份副本）不动，成品写到工作目录的 out/ 下。
+     *
+     * 详情页的「原 MD5」与结果页的「改后 MD5」都来自引擎的返回值 —— 不自己再算一遍，
+     * 免得界面显示的值和实际写进文件的值对不上。
+     */
+    fun runMd5Edit() {
+        val picked = _md5.value.picked ?: return
+        if (_md5.value.working) return
+        viewModelScope.launch {
+            _md5.value = _md5.value.copy(working = true, error = "", notice = null)
+            val r = withContext(Dispatchers.IO) {
+                runCatching {
+                    val dst = Md5Media.outFile(ctx, picked.name)
+                    val res = Engine.editMd5To(ctx, picked.path, dst.absolutePath)
+                    if (!res.ok) throw IllegalStateException(res.error.ifBlank { "改写失败" })
+                    if (!res.changed) throw IllegalStateException("没能改变这份文件的 MD5")
+                    // 成品的大小 / 时长 / 分辨率要重新探一次：改写过一遍，这几个值
+                    // 本来就可能和原件差一点点（重封装会让容器多出几个字节）
+                    val info = Md5Media.probe(dst, picked.kind)
+                    picked.copy(
+                        path = dst.absolutePath,
+                        size = info.size,
+                        durationMs = info.durationMs,
+                        width = info.width,
+                        height = info.height,
+                        md5 = res.after,
+                        md5Before = res.before.ifBlank { picked.md5 },
+                        sizeBefore = picked.size,
+                    )
+                }
+            }
+            _md5.value = r.fold(
+                onSuccess = {
+                    _md5.value.copy(
+                        working = false, error = "", stage = Md5Stage.Result, result = it,
+                    )
+                },
+                onFailure = { _md5.value.copy(working = false, error = it.message ?: "改写失败") },
+            )
+        }
+    }
+
+    /**
+     * 保存成品：复制进输出目录，并让相册收录它。
+     *
+     * 输出目录问引擎要，不自己拼路径 —— 没拿到存储权限时引擎会把目录退到应用私有
+     * 目录，界面照它说的显示，用户才知道该去哪儿找。
+     */
+    fun saveMd5Result() {
+        val result = _md5.value.result ?: return
+        if (_md5.value.working) return
+        viewModelScope.launch {
+            _md5.value = _md5.value.copy(working = true, error = "", notice = null)
+            val r = withContext(Dispatchers.IO) {
+                runCatching {
+                    val dir = Engine.settings(ctx).outputDir
+                    Md5Media.save(ctx, File(result.path), dir)
+                }
+            }
+            _md5.value = r.fold(
+                onSuccess = {
+                    _md5.value.copy(working = false, notice = "已保存到 ${it.absolutePath}")
+                },
+                onFailure = { _md5.value.copy(working = false, error = it.message ?: "保存失败") },
+            )
+        }
+    }
+
+    /** 回到入口页（重选视频 / 从结果页退回）。缓存里的副本留着，下一轮开始时统一清。 */
+    fun resetMd5Flow() {
+        _md5.value = _md5.value.copy(
+            stage = Md5Stage.Entry, picked = null, result = null,
+            working = false, error = "",
+        )
+    }
+
+    /** 一次性提示显示完就清掉，避免转屏后又弹一次。 */
+    fun consumeMd5Notice() {
+        _md5.value = _md5.value.copy(notice = null)
+    }
+
+    /**
+     * 开关「下载完成时自动改写 MD5」。
+     *
+     * 不给一次性提示：这个开关本身就显示在解析页上，拨动后状态自己就说明了结果，
+     * 再弹一句话属于多余。
+     */
+    fun setRewriteMd5(enabled: Boolean) {
+        viewModelScope.launch {
+            val fresh = withContext(Dispatchers.IO) {
+                runCatching { Engine.setRewriteMd5(ctx, enabled) }.getOrNull()
+            }
+            _settings.value = SettingsUi(loading = false, settings = fresh)
+        }
     }
 
     // ---- 外观 ----

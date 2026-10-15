@@ -14,6 +14,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -32,10 +34,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -57,6 +62,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -69,6 +75,8 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
     val parse by vm.parse.collectAsStateWithLifecycle()
     val download by vm.download.collectAsStateWithLifecycle()
     val needStoragePerm by vm.needStoragePermission.collectAsStateWithLifecycle()
+    // 下载页那个「下载时自动改 MD5」开关读的就是这份设置（默认关）
+    val settings by vm.settings.collectAsStateWithLifecycle()
     val uriHandler = LocalUriHandler.current
     val context = LocalContext.current
 
@@ -297,8 +305,12 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                     ResultCard(
                         video = state.video,
                         download = download,
-                        onDownload = vm::startDownload,
-                        onDownloadPage = { index -> vm.startDownload(state.video, index) },
+                        rewriteMd5 = settings.settings?.rewriteMd5OnDownload == true,
+                        onToggleRewriteMd5 = { vm.setRewriteMd5(it) },
+                        onDownload = { spec -> vm.startDownload(state.video, spec = spec) },
+                        onDownloadPage = { index, spec ->
+                            vm.startDownload(state.video, index, spec)
+                        },
                         onCopy = { vm.copyText(state.video.sourceUrl) },
                         onOpenSource = { uriHandler.openUriSafe(state.video.sourceUrl) },
                     )
@@ -312,13 +324,24 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
 private fun ResultCard(
     video: com.ytdlp.android.engine.Video,
     download: com.ytdlp.android.engine.Download,
-    onDownload: () -> Unit,
-    onDownloadPage: (Int) -> Unit,
+    rewriteMd5: Boolean,
+    onToggleRewriteMd5: (Boolean) -> Unit,
+    onDownload: (String) -> Unit,
+    onDownloadPage: (Int, String) -> Unit,
     onCopy: () -> Unit,
     onOpenSource: () -> Unit,
 ) {
     // 图集当前看到第几张（0 起）。「下载这张」要下的是它。
     var page by remember(video.id) { mutableStateOf(0) }
+    // 选中的下载档位（0 起）。引擎已把档位按「好 → 差」排好，所以第一项就是默认
+    // 的最高档 —— 界面不必再算一遍「哪个最高」。
+    // key 用 video.id：换一条作品要回到默认档，不能把上一条的选择带过来。
+    var tierIndex by remember(video.id) { mutableStateOf(0) }
+    // 交给引擎的下载规格。没有档位（图文 / 图集 / 实况图）时是空串，
+    // 由引擎自己决定下什么；有档位时就是用户选的那一条。
+    // 名字不能叫 spec：下面 Card 块里已有一个同名局部变量（画质/体积那行），
+    // 会把它遮蔽成 List<String>，编译器只报「类型不匹配」而不告诉你原因。
+    val tierSpec = video.tierList.getOrNull(tierIndex)?.specJson.orEmpty()
     Card {
         // 平台 + 作者一行
         Row(
@@ -384,12 +407,47 @@ private fun ResultCard(
             PlayerBox(video, source = justDownloaded ?: video.playSource)
         }
 
+        // MD5 一行 + 「下载时自动改 MD5」开关，都放在下载按钮**上方** ——
+        // 它们描述的是「这次下载会怎么处理文件」，属于下载前的设定。
+        // 图文 / 图集不显示：那类产物是一个目录，没有「单个文件的 MD5」这回事。
+        if (!video.isGallery) {
+            Spacer(Modifier.height(Dim.gapLg))
+            Text(
+                md5Line(video, tierIndex),
+                fontSize = Font.meta,
+                color = tone.textMuted,
+            )
+            Spacer(Modifier.height(Dim.gapSm))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Dim.gapSm),
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("下载时自动改 MD5", fontSize = Font.meta, color = tone.text)
+                    Text(
+                        if (rewriteMd5) {
+                            "下载完用 ffmpeg 无损重封装，换一个 MD5"
+                        } else {
+                            "关闭：文件按原样保存"
+                        },
+                        fontSize = Font.hint,
+                        color = tone.textMuted,
+                    )
+                }
+                Switch(
+                    checked = rewriteMd5,
+                    onCheckedChange = onToggleRewriteMd5,
+                    enabled = !download.active,
+                )
+            }
+        }
+
         Spacer(Modifier.height(Dim.gapLg))
 
         Row(horizontalArrangement = Arrangement.spacedBy(Dim.gap)) {
             PrimaryButton(
                 text = if (download.active) "下载中…" else if (video.isGallery) "下载全部" else "下载",
-                onClick = onDownload,
+                onClick = { onDownload(tierSpec) },
                 enabled = !download.active,
                 modifier = Modifier.weight(1f),
             )
@@ -397,7 +455,7 @@ private fun ResultCard(
             if (video.isGallery) {
                 GhostButton(
                     text = "下载第 ${page + 1} 张",
-                    onClick = { onDownloadPage(page + 1) },
+                    onClick = { onDownloadPage(page + 1, tierSpec) },
                     enabled = !download.active,
                     modifier = Modifier.weight(1f),
                 )
@@ -406,6 +464,16 @@ private fun ResultCard(
                     text = "复制链接",
                     onClick = onCopy,
                     modifier = Modifier.weight(1f),
+                )
+            }
+            // 档位选择器放最右：它是次要操作，靠边不抢下载按钮的位置。
+            // 只有一个档位等于没得选，不显示；图文 / 图集 / 实况图本身没有档位。
+            if (video.tierList.size > 1) {
+                TierSelector(
+                    tiers = video.tierList,
+                    index = tierIndex,
+                    enabled = !download.active,
+                    onSelect = { tierIndex = it },
                 )
             }
         }
@@ -431,13 +499,95 @@ private fun ResultCard(
 }
 
 /**
+ * 档位选择器：紧挨下载按钮的一个紧凑触发器，点开才是下拉列表。
+ *
+ * 为什么不做成一排常驻胶囊：档位文案是「720p · H.265 · 11.3 MB」这么长，
+ * 两三枚就把一行占满，下载按钮会被挤得没地方。触发器上只放短的那一段
+ * （如「720p ▾」），完整文案留在菜单项里 —— 细节只在真要选的时候才需要看。
+ *
+ * 半透明 + 主色文字：它是一个**次要**操作，视觉上要比下载主按钮安静，
+ * 不该跟主按钮争注意力。
+ */
+@Composable
+private fun TierSelector(
+    tiers: List<com.ytdlp.android.engine.Tier>,
+    index: Int,
+    enabled: Boolean,
+    onSelect: (Int) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    val fg = if (enabled) tone.accent else tone.textMuted
+    Box {
+        Row(
+            Modifier
+                // 宽度必须封顶：档位文案（如「1080p · H.265 · 88.0 MB」）偶尔会很长，
+                // 不封顶它会把同一行的「复制链接」挤到换行、变成两行显示。
+                // 这里只给触发器一个上限，完整文案照旧留给下拉菜单。
+                .widthIn(max = 110.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(tone.accentSoft.copy(alpha = 0.5f))
+                .clickable(enabled = enabled) { open = true }
+                .padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                shortTierLabel(tiers.getOrNull(index)?.label),
+                fontSize = Font.meta,
+                fontWeight = FontWeight.SemiBold,
+                color = fg,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text("▾", fontSize = Font.meta, color = fg)
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            tiers.forEachIndexed { i, tier ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            tier.label,
+                            fontSize = Font.meta,
+                            color = if (i == index) tone.accent else tone.text,
+                        )
+                    },
+                    onClick = {
+                        onSelect(i)
+                        open = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 「MD5」那一行显示什么。
+ *
+ * 抖音的解析结果里带平台自报的 file_hash，所以**下载前**就能显示；其他平台
+ * （YouTube / B站 这类走 yt-dlp 的）不提供文件级摘要，只能等下载时算。
+ * 优先显示**当前选中档位**那条 hash —— 用户选了哪一档，就该看哪一档的摘要。
+ */
+private fun md5Line(video: com.ytdlp.android.engine.Video, tierIndex: Int): String {
+    val hash = video.tierList.getOrNull(tierIndex)?.hash.orEmpty().ifBlank { video.sourceMd5 }
+    return if (hash.isNotBlank()) "MD5（平台自报）：$hash" else "MD5：下载完成后计算"
+}
+
+/**
+ * 触发器上只放档位的短标签：完整文案「720p · H.265 · 11.3 MB」在按钮旁放不下。
+ * 文案由引擎侧按「 · 」分段拼好，这里取第一段（也就是分辨率）。
+ */
+private fun shortTierLabel(label: String?): String =
+    (label ?: "").substringBefore(" · ").ifBlank { "规格" }
+
+/**
  * 跳到系统的「所有文件访问权限」设置页。
  *
  * 这是特殊权限，不能用 requestPermissions 申请，只能让用户手动开。
  * 部分国产 ROM 没有这个页面会抛 ActivityNotFoundException —— 那时退回
  * 应用详情页，用户也能在那里找到权限入口。
  */
-private fun openStorageSettings(context: Context) {
+internal fun openStorageSettings(context: Context) {
     val pkg = Uri.parse("package:${context.packageName}")
     val direct = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
         Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, pkg)

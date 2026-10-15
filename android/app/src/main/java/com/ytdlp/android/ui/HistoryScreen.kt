@@ -55,6 +55,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ytdlp.android.engine.Video
 import kotlinx.coroutines.launch
 
+/**
+ * 「其他」这个兜底分组的名字。
+ *
+ * 必须与引擎 detect_platform 的返回值一致 —— 那里所有平台的规则都不匹配时
+ * 返回的就是「其他」（见 ytdlp_engine.PLATFORM_RULES）。
+ */
+private const val OTHER_PLATFORM = "其他"
+
 /** 历史页：按平台筛选 + 列表 + 点开展开播放。对应网页端的第二个视图。 */
 @Composable
 fun HistoryScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
@@ -101,6 +109,17 @@ fun HistoryScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
 
         // ---- 平台筛选 ----
         if (history.counts.isNotEmpty()) {
+            // 顺序：**记录条数多的排前面**（谁解析得多谁靠前），条数一样时按平台名，
+            // 保证顺序不会随机抖动；「其他」是兜底桶，无论多少条都固定在最后 ——
+            // 它不是一个平台，排在前面会让人错以为它是个常用平台。
+            //
+            // 这里踩过的坑：原先这里是纯 `sorted()`（按名字排 Unicode 码位），
+            // 「其他」一常驻就按码位插到了「抖音」前面（抖 U+6296 > 其 U+5176），
+            // 抖音被顶到最后一位。按条数排 + 其他垫底就不会再有这种意外。
+            val platforms = history.counts.keys.filter { it != OTHER_PLATFORM }
+                .sortedWith(compareByDescending<String> { history.counts[it] ?: 0 }.thenBy { it }) +
+                OTHER_PLATFORM
+
             LazyRow(
                 Modifier
                     .fillMaxWidth()
@@ -118,8 +137,7 @@ fun HistoryScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                         onClick = { vm.selectPlatform(null) },
                     )
                 }
-                // 按平台名排序，保证每次进来的顺序稳定
-                items(history.counts.keys.sorted()) { platform ->
+                items(platforms) { platform ->
                     SelectChip(
                         label = platform,
                         badge = history.counts[platform] ?: 0,

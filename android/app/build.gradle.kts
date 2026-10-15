@@ -34,10 +34,10 @@ android {
         applicationId = "com.ytdlp.android"
         minSdk = 26
         targetSdk = 36
-        // 1.0.4：支持抖音图文/图集/实况图与 X 的图片/多视频/图文混排，并修掉
-        // 「伪成功」「播放串台」等一批问题 —— 详见 README 的更新日志
-        versionCode = 4
-        versionName = "1.0.4"
+        // 1.0.5：把 MD5 修改做成一条完整流程（相册选媒体 → 详情 → 改写 → 预览 → 另存副本），
+        // 并使「其他平台」成为常驻兜底分组 —— 详见 README 的更新日志
+        versionCode = 5
+        versionName = "1.0.5"
 
         ndk {
             // Chaquopy 的 Python 解释器是原生组件，必须显式声明 ABI。

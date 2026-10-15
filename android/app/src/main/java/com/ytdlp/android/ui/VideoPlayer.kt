@@ -312,6 +312,53 @@ private fun ExoPlayerView(
 }
 
 /**
+ * 直接播一个本地文件（MD5 页的预览用）。
+ *
+ * 与 PlayerBox 的分工：那边是「解析结果」的播放区 —— 可能压根没有可播源，所以要先
+ * 垫封面、等首帧到位再淡入；这里播的是**手上确实有的一份文件**（缓存里的副本，或刚
+ * 改完的成品），所以直接上播放器：暂停状态下 ExoPlayer 自己会把首帧渲染出来当封面。
+ *
+ * @param controls 要不要显示播放控件。详情页不要（那里只是一张预览图，上面盖着
+ *                 「重选视频」）；结果页要 —— 用户得在保存前确认这段视频真的能播。
+ */
+@Composable
+fun LocalPlayerView(path: String, controls: Boolean, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val player = remember(path) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(toPlayableUri(path)))
+            // 不自动播：预览就是停在那里的一帧，想看就自己点播放
+            playWhenReady = false
+            setAudioAttributes(
+                androidx.media3.common.AudioAttributes.Builder()
+                    .setUsage(androidx.media3.common.C.USAGE_MEDIA)
+                    .setContentType(androidx.media3.common.C.AUDIO_CONTENT_TYPE_MOVIE)
+                    .build(),
+                /* handleAudioFocus = */ true,
+            )
+            prepare()
+        }
+    }
+    DisposableEffect(player) {
+        onDispose { player.release() }
+    }
+
+    AndroidView(
+        factory = { ctx ->
+            PlayerView(ctx).apply {
+                this.player = player
+                useController = controls
+                setShutterBackgroundColor(android.graphics.Color.BLACK)
+            }
+        },
+        modifier = modifier,
+        // update 也要兜住 controls：同一个调用点若换了值，只设一次 factory 是不生效的
+        update = { it.useController = controls },
+        onRelease = { view -> view.player = null },
+    )
+}
+
+/**
  * 图文 / 图集 / 实况图的浏览区。
  *
  * 为什么不用播放器：这类内容没有可播的视频流（实况图虽有一段动效，但主体是图），

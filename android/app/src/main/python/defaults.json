@@ -10,6 +10,7 @@
 
   "engine": {
     "concurrent_fragments": 8,
+    "direct_threads": 6,
     "socket_timeout": 20
   },
 
