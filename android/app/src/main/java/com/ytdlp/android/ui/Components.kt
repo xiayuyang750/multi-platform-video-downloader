@@ -32,8 +32,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.abs
@@ -239,6 +243,38 @@ fun Hint(text: String, modifier: Modifier = Modifier) {
         lineHeight = 19.sp,
         color = tone.textMuted,
     )
+}
+
+/**
+ * 说明性小字（富文本版）。样式与上一版逐字一致，只多接受 AnnotatedString ——
+ * 设置页的科普要把关键处加粗，靠 [markedBold] 生成。
+ */
+@Composable
+fun Hint(text: AnnotatedString, modifier: Modifier = Modifier) {
+    Text(
+        text,
+        modifier = modifier,
+        fontSize = Font.hint,
+        lineHeight = 19.sp,
+        color = tone.textMuted,
+    )
+}
+
+/**
+ * 把文案里被 `**` 圈住的片段加粗。
+ *
+ * 用标记而不是直接拼 SpanStyle：这些说明是整段给用户读的，若在 Kotlin 里把一句话
+ * 切成「前半段 + 加粗 + 后半段」，以后每改一个字都要重排切口 —— 说明文字是最常改
+ * 的东西，那样写会把改动成本抬得很高。
+ *
+ * 只用于说明文字里的重点提示，不承担排版职责（要小标题就单独写一行加粗文字）。
+ */
+fun markedBold(text: String): AnnotatedString = buildAnnotatedString {
+    // 按 `**` 切开后，奇数段就是被圈住的那部分
+    text.split("**").forEachIndexed { i, part ->
+        if (i % 2 == 1) withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(part) }
+        else append(part)
+    }
 }
 
 /** 把秒数格式化成 12:34 或 1:02:03。 */

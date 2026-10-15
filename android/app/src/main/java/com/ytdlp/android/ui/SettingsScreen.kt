@@ -200,6 +200,26 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
             )
         }
 
+        // ---- 抖音解析不了？ ----
+        // 给抖音兜底链路失败留一个出口。风控挡的是这个应用、不是那条作品，所以除了
+        // 「过一会儿再试」，还能给用户一个只做抖音的专用工具 —— 它走的是另一条链路。
+        Card {
+            FieldLabel("抖音解析不了？")
+            Spacer12()
+            Hint(
+                "正常链接一般在 10 秒内就有结果。同一条作品反复失败，多半是抖音的风控在挡，" +
+                    "过一段时间再解析通常就好。\n" +
+                    "一直不行的话，可以试试另一个只做抖音的下载工具（作者的另一个项目），" +
+                    "它走的链路和这里不一样："
+            )
+            Spacer12()
+            GhostButton(
+                text = "下载备用 app（抖音下载器）",
+                onClick = { uriHandler.openUriSafe(DOUYIN_TOOL_URL) },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
         // ---- 版本更新 ----
         Card {
             FieldLabel("版本更新")
@@ -291,9 +311,42 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                     "X 在官方接口失效时走备用链路。\n" +
                     "反馈渠道打不开时可以发邮件到 ${FEEDBACK_MAIL}，记得备注主题或来意。"
             )
+            Spacer12()
+            // 下面两段是「科普」：用户最容易在这两处犯迷糊 —— 为什么同样 1080p 体积
+            // 差一倍、为什么改完 MD5 画质没变。第一行加粗当小标题用。
+            Hint(
+                markedBold(
+                    "**清晰度、编码与体积**\n" +
+                        "同样标着 1080p，体积可能差出一倍 —— 差的是**编码与码率**，不是分辨率。" +
+                        "H.264 兼容性最好、体积偏大；H.265 同样画质下体积小得多，但部分老机型" +
+                        "硬解不了（下到这类文件，换个播放器可能黑屏或只有声音）；AV1 体积更小，" +
+                        "能放的设备更少。\n" +
+                        "档位标签已经把分辨率和编码写明（形如 720p · H.265 · 37.4 MB），按你要" +
+                        "用的设备挑；拿不准就选 H.264 那一档。抖音用的是平台下发的档位，" +
+                        "B站 / YouTube 这类音视频分开给的站点，由内置的 yt-dlp 选流、再用 " +
+                        "ffmpeg 合成一个文件。"
+                )
+            )
+            Spacer12()
+            Hint(
+                markedBold(
+                    "**MD5**\n" +
+                        "MD5 是整份文件的指纹（一串 32 位十六进制）。平台常用它判断「这份文件" +
+                        "是不是已经有人传过」，所以换掉指纹，同一份内容就会被当成一份新文件。\n" +
+                        "改的是**容器里的元数据，不动画面**：视频往 mp4 的 comment 里写一个随机" +
+                        "串，图片写进 PNG 的 tEXt 块或 JPEG 的 COM 段 —— **音视频一个字节都没有" +
+                        "重编码**，画质零损失，产物也仍然是完全规范的文件，播放器和相册照常识别。\n" +
+                        "所以改完前后体积只差几十字节，大小看着几乎没变是对的。操作在底部" +
+                        "「MD5」页签，全程另存副本，原文件不会被改动。"
+                )
+            )
         }
     }
 }
+
+/** 抖音下载器的发布页。它是作者的另一个项目，只处理抖音 —— 遇到风控时的备用出口。 */
+private const val DOUYIN_TOOL_URL =
+    "https://github.com/xiayuyang750/watermark-tool/releases/tag/v0.4.0"
 
 /** 与 Windows 端保持一致（main.py 的 FEEDBACK_MAIL）。 */
 private const val FEEDBACK_MAIL = "xiayuyang750@gmail.com"

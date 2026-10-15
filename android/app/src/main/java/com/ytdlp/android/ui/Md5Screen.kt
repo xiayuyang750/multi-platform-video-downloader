@@ -182,10 +182,12 @@ private fun EntryStage(
     Text("MD5 修改", fontSize = Font.viewTitle, fontWeight = FontWeight.SemiBold, color = tone.text)
 
     Hint(
-        "MD5 是整份文件的指纹。平台常拿它判断「这个文件是不是已经有人传过」，" +
-            "所以改掉它可以让同一个视频在平台上被当成新文件。\n" +
-            "改写用的是 ffmpeg 无损重封装（不重编码，画质不变），只会在元数据里" +
-            "写一个随机串。代价是文件要被完整重写一遍，大文件会等几秒到十几秒。"
+        markedBold(
+            "**MD5 是整份文件的指纹**。平台常拿它判断「这个文件是不是已经有人传过」，" +
+                "所以改掉它可以让同一个视频在平台上被当成新文件。\n" +
+                "改写用的是 ffmpeg 无损重封装（不重编码，画质不变），**只会在元数据里" +
+                "写一个随机串**。代价是文件要被完整重写一遍，大文件会等几秒到十几秒。"
+        )
     )
 
     PickBox(enabled = !state.working, onPickVideo = onPickVideo, onPickImage = onPickImage)
