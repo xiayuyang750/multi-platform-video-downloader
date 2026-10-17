@@ -247,6 +247,17 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 "一个密钥绑定一台手机。换手机时可在开发者处解绑，不必重新购买。\n" +
                     "已激活的设备离线也能用；只有被停用或换绑时才会重新要求激活。"
             )
+            Spacer12()
+            Hint(
+                "授权验证由 Cloudflare Workers 提供。国内网络无法直接访问，\n" +
+                    "首次输入密钥激活时需要开启 VPN；激活成功后日常使用不再需要。"
+            )
+            Spacer12()
+            GhostButton(
+                text = "激活需要 VPN？下载加速器",
+                onClick = { uriHandler.openUriSafe(VPN_TOOL_URL) },
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
 
         // ---- 版本更新 ----
@@ -383,6 +394,18 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
 /** 抖音下载器的发布页。它是作者的另一个项目，只处理抖音 —— 遇到风控时的备用出口。 */
 private const val DOUYIN_TOOL_URL =
     "https://github.com/xiayuyang750/watermark-tool/releases/tag/v0.4.0"
+
+/**
+ * VPN 加速器的下载地址。
+ *
+ * 为什么需要它：授权验证跑在 Cloudflare Workers 上，国内网络直连不了。
+ * 用户第一次激活必须先开 VPN，而「没有 VPN 就下载不了 VPN」是个死循环，
+ * 所以这个入口必须放在国内能打开的地址上。
+ *
+ * 当前先指向 GitHub Releases，等上传完成后换成国内网盘（蓝奏云 / 123 云盘）的分享链接。
+ */
+private const val VPN_TOOL_URL =
+    "https://github.com/xiayuyang750/watermark-tool/releases"
 
 /** 与 Windows 端保持一致（main.py 的 FEEDBACK_MAIL）。 */
 private const val FEEDBACK_MAIL = "xiayuyang750@gmail.com"

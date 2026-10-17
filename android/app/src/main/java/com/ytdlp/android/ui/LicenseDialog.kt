@@ -117,6 +117,13 @@ fun LicenseDialog(
 
                 Spacer(Modifier.height(12.dp))
                 Text(
+                    "首次激活需要连接境外授权服务器。国内网络请先开启 VPN，激活成功后即可关闭。",
+                    fontSize = Font.hint,
+                    lineHeight = 18.sp,
+                    color = tone.textMuted,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
                     "一个密钥只能绑定一台手机。换手机时联系开发者解绑，不用重新购买。",
                     fontSize = Font.hint,
                     lineHeight = 18.sp,
