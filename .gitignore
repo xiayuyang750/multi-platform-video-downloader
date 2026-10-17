@@ -34,6 +34,9 @@ desktop.ini
 # 授权联调服务器的本地数据（里面是测试密钥，不进仓库）
 server/.dev-data.json
 
+# 授权配置备忘：含 LICENSE_SECRET 与 ADMIN_TOKEN，绝不能进版本控制
+docs/授权服务-配置备忘.docx
+
 # 本机测试用的链接清单与登录凭据（test-cookie.md 里是 Netscape 格式的会话 Cookie）。
 # 这两个文件都躺在仓库目录里，本地方便，但绝不能进公开仓库 —— 漏一条就是凭据泄漏。
 test-cookie.md
