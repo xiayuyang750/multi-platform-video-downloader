@@ -20,6 +20,9 @@ import com.ytdlp.android.engine.Settings
 import com.ytdlp.android.engine.UpdateChecker
 import com.ytdlp.android.engine.Video
 import com.ytdlp.android.firstUrl
+import com.ytdlp.android.license.DeviceId
+import com.ytdlp.android.license.LicenseApi
+import com.ytdlp.android.license.LicenseStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -72,6 +75,23 @@ data class SettingsUi(
     val loading: Boolean = true,
     val settings: Settings? = null,
     /** 一次性提示（如「目录已更新」），显示后由界面调 consumeNotice 清掉 */
+    val notice: String? = null,
+)
+
+/**
+ * 授权状态。
+ *
+ * 未激活时给 3 次免费解析；用完后 [dialog] 变 true，界面弹输入密钥的框。
+ * 已激活时 [trialLeft] 不再有意义，界面按 [activated] 显示。
+ */
+data class LicenseUi(
+    val activated: Boolean = false,
+    val trialLeft: Int = LicenseStore.TRIAL_TOTAL,
+    val dialog: Boolean = false,
+    val working: Boolean = false,
+    val error: String = "",
+    /** 上次成功用过的密钥。弹框时预填，省得用户重新翻聊天记录 */
+    val savedKey: String = "",
     val notice: String? = null,
 )
 
@@ -163,6 +183,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val _themeMode = MutableStateFlow(ThemePrefs.load(ctx))
     val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
 
+    private val licenseStore = LicenseStore(ctx)
+
+    private val _license = MutableStateFlow(
+        LicenseUi(
+            activated = licenseStore.activated,
+            trialLeft = licenseStore.trialLeft,
+        )
+    )
+    val license: StateFlow<LicenseUi> = _license.asStateFlow()
+
+    /**
+     * 本次解析是否已经扣过试用次数。
+     *
+     * 一次解析可能分两段完成（先 NeedBrowser、再 WebView 回来入库），
+     * 不能两段各扣一次，否则用户点一次就少两次。
+     */
+    private var trialCharged = false
+
     // 注意：上面这些 StateFlow 必须声明在 init 块**之前**。
     // Kotlin 按代码顺序初始化属性，而 init 里会调用 refreshStoragePermission()，
     // 若把 _needStoragePermission 写在文件末尾，init 执行时它还是 null，
@@ -194,6 +232,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         refreshSettings()
         refreshStoragePermission()
         startPollingDownload()
+        verifyLicenseInBackground()
     }
 
     // ---- 输入 ----
@@ -230,6 +269,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val target = firstUrl(raw) ?: raw
         if (target != raw) _url.value = target
         if (parseJob?.isActive == true) return
+        // 授权门禁：试用次数用完且未激活时，直接弹输入密钥的框，不发起解析
+        if (!licenseGate()) return
+        trialCharged = false
 
         _parse.value = ParseUi.Loading
         parseJob = viewModelScope.launch {
@@ -251,6 +293,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 else -> when (val r = result.getOrThrow()) {
                     is Engine.ParseResult.Ok -> {
+                        // 解析成功才扣试用次数：失败不扣，避免用户白白损失一次
+                        chargeTrialOnce()
                         // 解析成功会把记录写进历史库，这里顺手刷新，
                         // 用户切到历史页就能看到，不用手动下拉
                         refreshHistory()
@@ -258,6 +302,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     is Engine.ParseResult.Err -> if (r.needWebview) {
                         // 抖音 / 小红书：交给界面的 WebView 解析页继续
+                        chargeTrialOnce()
                         ParseUi.NeedBrowser(
                             target,
                             r.message,
@@ -321,6 +366,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 else -> when (val r = result.getOrThrow()) {
                     is Engine.ParseResult.Ok -> {
+                        chargeTrialOnce()
                         refreshHistory()
                         ParseUi.Done(r.info)
                     }
@@ -777,6 +823,139 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             _settings.value = SettingsUi(loading = false, settings = fresh)
         }
+    }
+
+    // ---- 授权 ----
+
+    /**
+     * 启动时做一次静默校验。
+     *
+     * 三种情况要分开处理：
+     *   - 服务器说「授权仍然有效」→ 顺手更新 token（快到期时会换新的）；
+     *   - 网络不通 → 什么都不做，本地凭证继续用（离线不能把人锁在门外）；
+     *   - 服务器明确拒绝（停用 / 换绑 / token 过期）→ 先拿原密钥自动重激活一次
+     *     （同一台设备重激活本来就合法，能救回「只是 token 过期」的人），
+     *     重激活也失败才清掉凭证并弹框。
+     */
+    private fun verifyLicenseInBackground() {
+        val key = licenseStore.key
+        val token = licenseStore.token
+        if (key.isBlank() || token.isBlank()) return
+
+        viewModelScope.launch {
+            val checked = withContext(Dispatchers.IO) {
+                runCatching { LicenseApi.verify(key, DeviceId.get(ctx), token) }
+            }
+
+            checked.onSuccess { res ->
+                licenseStore.save(key, res.token.ifBlank { token }, res.exp)
+                refreshLicense()
+            }
+
+            val fatal = (checked.exceptionOrNull() as? LicenseApi.LicenseException)?.fatal == true
+            if (!fatal) return@launch
+
+            val retry = withContext(Dispatchers.IO) {
+                runCatching { LicenseApi.activate(key, DeviceId.get(ctx)) }
+            }
+            retry.fold(
+                onSuccess = { res ->
+                    licenseStore.save(res.key, res.token, res.exp)
+                    refreshLicense()
+                },
+                onFailure = { e ->
+                    licenseStore.clearToken()
+                    _license.value = _license.value.copy(
+                        activated = false,
+                        trialLeft = licenseStore.trialLeft,
+                        savedKey = licenseStore.key,
+                        error = e.message ?: "授权已失效，请重新输入密钥",
+                        dialog = true,
+                    )
+                },
+            )
+        }
+    }
+
+    fun refreshLicense() {
+        _license.value = _license.value.copy(
+            activated = licenseStore.activated,
+            trialLeft = licenseStore.trialLeft,
+            savedKey = licenseStore.key,
+        )
+    }
+
+    fun openLicenseDialog() {
+        // 先刷新一次，保证 savedKey 跟上本地存储（预填上次用过的密钥）
+        refreshLicense()
+        _license.value = _license.value.copy(dialog = true, error = "")
+    }
+
+    fun dismissLicenseDialog() {
+        if (_license.value.working) return
+        _license.value = _license.value.copy(dialog = false, error = "")
+    }
+
+    fun consumeLicenseNotice() {
+        _license.value = _license.value.copy(notice = null)
+    }
+
+    fun activateLicense(input: String) {
+        if (_license.value.working) return
+        val typed = input.trim()
+        if (typed.isBlank()) {
+            _license.value = _license.value.copy(error = "请先输入密钥")
+            return
+        }
+        _license.value = _license.value.copy(working = true, error = "")
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { LicenseApi.activate(typed, DeviceId.get(ctx)) }
+            }
+            _license.value = result.fold(
+                onSuccess = { res ->
+                    licenseStore.save(res.key, res.token, res.exp)
+                    LicenseUi(
+                        activated = true,
+                        trialLeft = licenseStore.trialLeft,
+                        savedKey = res.key,
+                        notice = "激活成功，已解除次数限制",
+                    )
+                },
+                onFailure = { e ->
+                    _license.value.copy(working = false, error = e.message ?: "激活失败")
+                },
+            )
+        }
+    }
+
+    /** 开发/测试用：清掉授权与试用计数，回到「刚装好」的状态。 */
+    fun resetLicenseForTest() {
+        licenseStore.clearAll()
+        trialCharged = false
+        _license.value = LicenseUi(
+            activated = false,
+            trialLeft = LicenseStore.TRIAL_TOTAL,
+            notice = "已清除授权与试用次数（测试）",
+        )
+    }
+
+    /** 解析前的门禁。返回 false 时对话框已经弹好，调用方直接退出即可。 */
+    private fun licenseGate(): Boolean {
+        refreshLicense()
+        if (licenseStore.activated) return true
+        if (licenseStore.trialLeft > 0) return true
+        _license.value = _license.value.copy(dialog = true, error = "")
+        return false
+    }
+
+    /** 一次成功的解析只扣一次，WebView 两段式流程也只扣一次。 */
+    private fun chargeTrialOnce() {
+        if (trialCharged) return
+        trialCharged = true
+        if (licenseStore.activated) return
+        licenseStore.addTrial()
+        refreshLicense()
     }
 
     // ---- 外观 ----

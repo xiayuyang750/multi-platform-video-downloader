@@ -36,12 +36,15 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -78,6 +81,16 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 fun MainScreen(vm: AppViewModel) {
     var tab by rememberSaveable { mutableStateOf(Tab.Parse) }
     val download by vm.download.collectAsStateWithLifecycle()
+    val license by vm.license.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // 激活成功 / 清除授权这类一次性提示，用底部提示条显示，不打断当前操作
+    LaunchedEffect(license.notice) {
+        license.notice?.let {
+            snackbarHostState.showSnackbar(it)
+            vm.consumeLicenseNotice()
+        }
+    }
 
     // 历史页点「重新解析」时，需要把用户带到解析页看结果
     val openParse by vm.openParse.collectAsStateWithLifecycle()
@@ -101,6 +114,7 @@ fun MainScreen(vm: AppViewModel) {
 
     Scaffold(
         containerColor = tone.bg,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             Column {
                 // 下载条压在导航栏上方：它在网页端是固定的底部条，
@@ -167,6 +181,13 @@ fun MainScreen(vm: AppViewModel) {
                     Tab.Settings -> SettingsScreen(vm)
                 }
             }
+
+            // 授权框放在最外层：解析页拦截、设置页主动打开，都复用同一个
+            LicenseDialog(
+                state = license,
+                onActivate = vm::activateLicense,
+                onDismiss = vm::dismissLicenseDialog,
+            )
         }
     }
 }

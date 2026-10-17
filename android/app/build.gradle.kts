@@ -22,6 +22,13 @@ val keystoreProps = Properties().apply {
     if (f.exists()) f.inputStream().use { load(it) }
 }
 
+// 授权服务地址。默认是占位符（App 里会明确提示「尚未配置」）；
+// 打包时用 -PlicenseBaseUrl=https://xxx.workers.dev 覆盖，不必改代码。
+val licenseBaseUrl = (project.findProperty("licenseBaseUrl") as String?)
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+    ?: "https://license-not-configured.invalid"
+
 android {
     namespace = "com.ytdlp.android"
     // Compose BOM 2026.09.00 里的库要求 compileSdk ≥ 37，所以这里必须用
@@ -38,6 +45,9 @@ android {
         // 品牌图标两端同步）。这一版仍在开发中，README 更新日志与发布页收尾时统一补。
         versionCode = 6
         versionName = "1.0.6"
+
+        // 授权服务地址，见文件上方 licenseBaseUrl 的说明
+        buildConfigField("String", "LICENSE_BASE_URL", "\"$licenseBaseUrl\"")
 
         ndk {
             // Chaquopy 的 Python 解释器是原生组件，必须显式声明 ABI。

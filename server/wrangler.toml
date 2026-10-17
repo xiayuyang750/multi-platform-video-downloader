@@ -1,0 +1,19 @@
+# Cloudflare Worker 部署配置（可选）
+#
+# 用命令行部署时：
+#   npm i -g wrangler
+#   wrangler login
+#   wrangler kv namespace create LICENSES      # 把返回的 id 填到下面
+#   wrangler secret put LICENSE_SECRET         # 输入一串足够长的随机字符
+#   wrangler secret put ADMIN_TOKEN            # 输入你的管理口令
+#   wrangler deploy
+#
+# 如果不想装命令行，可以直接在 Cloudflare 网页后台粘贴 worker.js，效果一样。
+
+name = "watermark-license"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[[kv_namespaces]]
+binding = "LICENSES"
+id = "在这里填你的 KV namespace id"

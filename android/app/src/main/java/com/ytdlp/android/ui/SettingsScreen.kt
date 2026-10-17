@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
@@ -38,6 +40,7 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
     val state by vm.settings.collectAsStateWithLifecycle()
     val update by vm.update.collectAsStateWithLifecycle()
     val themeMode by vm.themeMode.collectAsStateWithLifecycle()
+    val license by vm.license.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val scope = rememberCoroutineScope()
@@ -222,6 +225,30 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
             )
         }
 
+        // ---- 授权 ----
+        Card {
+            FieldLabel("授权")
+            Spacer12()
+            Text(
+                if (license.activated) "已激活 · 无次数限制"
+                else "未激活 · 剩余免费解析 ${license.trialLeft} 次",
+                fontSize = Font.body,
+                fontWeight = FontWeight.SemiBold,
+                color = if (license.activated) tone.accent else tone.text,
+            )
+            Spacer12()
+            GhostButton(
+                text = if (license.activated) "更换密钥" else "输入密钥",
+                onClick = vm::openLicenseDialog,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer12()
+            Hint(
+                "一个密钥绑定一台手机。换手机时可在开发者处解绑，不必重新购买。\n" +
+                    "已激活的设备离线也能用；只有被停用或换绑时才会重新要求激活。"
+            )
+        }
+
         // ---- 版本更新 ----
         Card {
             FieldLabel("版本更新")
@@ -230,6 +257,11 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 "当前版本 ${BuildConfig.VERSION_NAME}",
                 fontSize = Font.meta,
                 color = tone.textMuted,
+                // 测试入口：长按版本号清掉授权与试用计数，回到「刚装好」的状态。
+                // 正式对外发布前可以删掉这一段。
+                modifier = Modifier.pointerInput(Unit) {
+                    detectTapGestures(onLongPress = { vm.resetLicenseForTest() })
+                },
             )
 
             when (val u = update) {

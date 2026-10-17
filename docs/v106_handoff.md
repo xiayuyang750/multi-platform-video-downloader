@@ -185,6 +185,79 @@
 
 **未做 / 待补**：表情包、微博长文、视频+图混排等「内容形态」尚未逐条测；真实分享链接（尤其 `t.cn` 短链）到手后再补一轮。
 
+> 后续修订：上面这条结论只对「视频类」成立。图文 / 图集 / 实况图 / 动图 / 头条文章在 yt-dlp 里会直接报 `No video formats found!`，已改为 WebView 读 `$render_data.status`。详见 `docs/微博-内容形态测试记录.md` 第六节。
+
+### 九、一机一码授权（2026-10-17，服务器版测试完成）
+
+**目标**：用户只输密钥，App 自动识别本机并绑定；同一个密钥换到别的手机用不了。
+未激活时给 **3 次免费解析**，第 4 次弹激活框。
+
+#### 9.1 协议
+
+| 部件 | 规则 |
+|---|---|
+| 密钥 | `WM-XXXX-XXXX-XXXX`，Crockford Base32（去掉 I/L/O/U），12 位 = 60 bit |
+| 设备码 | `SHA-256("wm-license-v1|ANDROID_ID|厂商|品牌|型号|设备名")` 前 32 位 |
+| 绑定 | 服务端 KV 里记 `{ key, device, at, banned }`；第二次换机返回 `bound_elsewhere` |
+| 凭证 | `base64url(payload) + "." + base64url(HMAC-SHA256(payload))`，payload 含 key/device/exp |
+| 有效期 | 30 天；剩余不足一半时 `/api/verify` 顺手续期 |
+| 离线 | 本地有 token 就放行；网络失败不降级，只有服务端明确拒绝才清凭证 |
+| 试用 | 本地计数，解析**成功**才扣一次（WebView 两段式也只扣一次） |
+
+#### 9.2 新增文件
+
+服务端（`server/`）：
+
+| 文件 | 作用 |
+|---|---|
+| `worker.js` | Cloudflare Worker：activate / verify / admin / 管理页 |
+| `worker.test.mjs` | Node 测试，14 项 |
+| `dev-server.mjs` | 本地联调服务器（文件持久化），真机连同一 WiFi 即可测 |
+| `README.md` | Cloudflare 网页部署步骤 |
+| `wrangler.toml` | 可选：命令行部署配置 |
+
+安卓端：
+
+| 文件 | 作用 |
+|---|---|
+| `license/DeviceId.kt` | 设备码 |
+| `license/LicenseStore.kt` | 密钥 / token / 试用计数 |
+| `license/LicenseApi.kt` | 激活、校验（区分「明确的拒绝」与「网络故障」） |
+| `ui/LicenseDialog.kt` | 激活对话框 |
+| `ui/AppViewModel.kt` | 授权状态、门禁、激活、启动静默校验 |
+| `ui/MainScreen.kt` | 对话框 + 底部提示条 |
+| `ui/SettingsScreen.kt` | 授权卡片；**长按版本号**清授权（测试入口，发布前可删） |
+
+打包参数（`android/app/build.gradle.kts` 里写进 `BuildConfig.LICENSE_BASE_URL`）：
+
+```powershell
+gradle -p android assembleRelease --offline `
+  "-PlicenseBaseUrl=https://watermark-license.xxx.workers.dev"
+```
+
+不传时是占位符，App 会提示「授权服务器还没有配置」。
+
+#### 9.3 真机验证（vivo V2425A）
+
+| 场景 | 结果 |
+|---|---|
+| 前 3 次解析 | ✅ 正常出结果，第 4 次弹「输入授权密钥」 |
+| 输入测试密钥（含全角横线） | ✅ 归一化成功，激活通过 |
+| 服务端记录 | ✅ 该密钥 `device=a3d7799d…` |
+| 重启 App | ✅ 设置页显示「已激活 · 无次数限制」 |
+| 管理页停用 | ✅ 重启后弹框并显示「这个密钥已被停用」 |
+| 恢复 + 重新激活 | ✅ 密钥已预填，一键激活成功 |
+| 长按版本号 | ✅ 回到「未激活 · 剩余免费解析 3 次」 |
+| 换机拒绝 | 由服务端单元测试覆盖（真机无法改 ANDROID_ID） |
+
+#### 9.4 已知限制
+
+- **必须有服务器**：「只输密钥 + 自动绑机 + 换机失效」三者同时成立，绕不开一个共享账本。纯离线做不到。
+- **国内访问**：`*.workers.dev` 经常连不上，正式发布要绑自定义域名（`server/README.md` 第三节）。
+- **试用记在本地**：清应用数据会重置 3 次；量大了再改服务端记账。
+- **防不住改包**：目标只是防「一个密钥到处传」，不是防专业破解。
+- **KV 非强一致**：同一密钥两台设备毫秒级并发激活理论上都可能成功；个人规模可忽略。
+
 
 
 
