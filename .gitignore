@@ -34,6 +34,9 @@ desktop.ini
 # 授权联调服务器的本地数据（里面是测试密钥，不进仓库）
 server/.dev-data.json
 
+# Office 打开文档时产生的锁文件
+~$*
+
 # 授权配置备忘：含 LICENSE_SECRET 与 ADMIN_TOKEN，绝不能进版本控制
 docs/授权服务-配置备忘.docx
 
