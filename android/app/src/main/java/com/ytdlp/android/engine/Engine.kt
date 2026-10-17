@@ -81,13 +81,17 @@ object Engine {
         data class Ok(val info: Video) : ParseResult
 
         /**
-         * @param needWebview 真表示这个平台要走浏览器模式（抖音）。
+         * @param needWebview 真表示这个平台要走浏览器模式。
          *   引擎自己取不到数，需要界面拉起 WebView 解析页 —— 这是两边
-         *   约定的信号，见 ytdlp_engine._parse_douyin。
+         *   约定的信号，见 ytdlp_engine._parse_douyin 与 parse_url 里
+         *   小红书那段。
+         * @param webviewKind 用哪个浏览器解析页：`douyin` / `xhs`。
+         *   空串按 douyin 处理（老行为不变）。
          */
         data class Err(
             val message: String,
             val needWebview: Boolean = false,
+            val webviewKind: String = "",
         ) : ParseResult
     }
 
@@ -98,6 +102,7 @@ object Engine {
             return ParseResult.Err(
                 message = obj.optString("error").ifBlank { "解析失败" },
                 needWebview = obj.optBoolean("need_webview"),
+                webviewKind = obj.optString("webview_kind"),
             )
         }
         return ParseResult.Ok(Video.fromParseResult(obj))
@@ -113,6 +118,24 @@ object Engine {
         val obj = JSONObject(module(context).callAttr("save_douyin", payloadJson).toString())
         if (!obj.optBoolean("ok")) {
             return ParseResult.Err(obj.optString("error").ifBlank { "抖音数据入库失败" })
+        }
+        return ParseResult.Ok(Video.fromParseResult(obj))
+    }
+
+    /** 同 [saveDouyin]，只是换成小红书那条入库入口（多一种「图集」内容形态）。 */
+    fun saveXhs(context: Context, payloadJson: String): ParseResult {
+        val obj = JSONObject(module(context).callAttr("save_xhs", payloadJson).toString())
+        if (!obj.optBoolean("ok")) {
+            return ParseResult.Err(obj.optString("error").ifBlank { "小红书数据入库失败" })
+        }
+        return ParseResult.Ok(Video.fromParseResult(obj))
+    }
+
+    /** 微博的浏览器模式取数结果入库（图文 / 图集 / 实况图 / 动图）。 */
+    fun saveWeibo(context: Context, payloadJson: String): ParseResult {
+        val obj = JSONObject(module(context).callAttr("save_weibo", payloadJson).toString())
+        if (!obj.optBoolean("ok")) {
+            return ParseResult.Err(obj.optString("error").ifBlank { "微博数据入库失败" })
         }
         return ParseResult.Ok(Video.fromParseResult(obj))
     }

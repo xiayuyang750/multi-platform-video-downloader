@@ -74,6 +74,24 @@
             android:label="浏览器模式解析"
             android:theme="@style/Theme.Ytdlp.Transparent" />
 
+        <!-- 小红书的浏览器模式解析页。主题同样是全透明的，但它多一种形态：
+             需要登录时会**露出窗口**让用户就地登录一次（登录后页面自己跳回笔记页，
+             数据到手即自动继续）。这样用户不必再导出/导入 cookies.txt。 -->
+        <activity
+            android:name=".XhsActivity"
+            android:exported="false"
+            android:label="小红书解析"
+            android:theme="@style/Theme.Ytdlp.Transparent" />
+
+        <!-- 微博正文的浏览器模式解析页（图文 / 图集 / 实况图 / 动图）。
+             它永远不露给用户：微博不需要登录，这个窗口只是用来过掉「访客系统」
+             并从页面里读数据。 -->
+        <activity
+            android:name=".WeiboActivity"
+            android:exported="false"
+            android:label="微博解析"
+            android:theme="@style/Theme.Ytdlp.Transparent" />
+
         <!-- 意见反馈页：从设置页进入，填完直接发到开发者的企业微信群。
              windowSoftInputMode 用 adjustResize，否则展开键盘会盖住输入框。 -->
         <activity

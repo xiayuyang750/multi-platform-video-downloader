@@ -12,12 +12,14 @@ const PLATFORM_META = {
   'TikTok':    { cls: 'pf-tiktok',    letter: 'T' },
   'X':         { cls: 'pf-x',         letter: 'X' },
   'Instagram': { cls: 'pf-instagram', letter: 'I' },
+  '小红书':     { cls: 'pf-xiaohongshu', letter: '红' },
+  '微博':       { cls: 'pf-weibo',     letter: '微' },
   // 未识别平台的聚合入口。库里存的值是「其他」，只在界面上显示为「其他平台」，
   // 这样已有的历史记录不用做数据迁移。
   '其他':      { cls: 'pf-other',     letter: '·', label: '其他平台' },
 };
 // 顺序即切换栏的显示顺序；「其他」放最后，作为兜底聚合入口
-const PLATFORM_ORDER = ['YouTube', 'B站', '抖音', 'TikTok', 'X', 'Instagram', '其他'];
+const PLATFORM_ORDER = ['YouTube', 'B站', '抖音', 'TikTok', 'X', 'Instagram', '小红书', '微博', '其他'];
 
 function platformMeta(name) {
   return PLATFORM_META[name] || { cls: 'pf-other', letter: '·' };

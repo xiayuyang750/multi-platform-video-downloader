@@ -129,6 +129,10 @@ object PlatformColor {
     val douyin = Color(0xFFFE2C55)
     val tiktok = Color(0xFF161823)
     val instagram = Color(0xFFC13584)
+    // 小红书品牌红取自它官网自己的样式（#FF2442）
+    val xiaohongshu = Color(0xFFFF2442)
+    // 微博品牌红（simple-icons 的 Sina Weibo 色值）
+    val weibo = Color(0xFFE6162D)
     val other = Color(0xFF6B7280)
 
     /** 按平台名取色。名字来自 engine 的 detect_platform。 */
@@ -139,6 +143,8 @@ object PlatformColor {
         "抖音" -> douyin
         "TikTok" -> tiktok
         "Instagram" -> instagram
+        "小红书" -> xiaohongshu
+        "微博" -> weibo
         else -> other
     }
 
@@ -150,6 +156,8 @@ object PlatformColor {
         "抖音" -> "抖"
         "TikTok" -> "T"
         "Instagram" -> "I"
+        "小红书" -> "红"
+        "微博" -> "微"
         else -> "其"
     }
 }

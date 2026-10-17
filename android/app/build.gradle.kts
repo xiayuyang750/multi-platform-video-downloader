@@ -34,10 +34,10 @@ android {
         applicationId = "com.ytdlp.android"
         minSdk = 26
         targetSdk = 36
-        // 1.0.5：把 MD5 修改做成一条完整流程（相册选媒体 → 详情 → 改写 → 预览 → 另存副本），
-        // 并使「其他平台」成为常驻兜底分组 —— 详见 README 的更新日志
-        versionCode = 5
-        versionName = "1.0.5"
+        // 1.0.6：新平台接入（小红书先行 —— 识别规则、Cookie 规则、错误提示、
+        // 品牌图标两端同步）。这一版仍在开发中，README 更新日志与发布页收尾时统一补。
+        versionCode = 6
+        versionName = "1.0.6"
 
         ndk {
             // Chaquopy 的 Python 解释器是原生组件，必须显式声明 ABI。

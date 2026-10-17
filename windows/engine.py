@@ -35,7 +35,8 @@ DONE_MARK = "__DONE__"
 # 抖音这几个域名是实测出来的：采样 160 条直链，全部落在 365yg.com / amemv.com 上，
 # 一条 douyinvod.com 都没有 —— 只认 douyinvod.com 会让文件名退化成 URL 片段。
 # 与安卓端 ytdlp_engine.DIRECT_URL_HOSTS 对应，改一处要同步另一处。
-DIRECT_URL_HOSTS = ("douyinvod.com", "365yg.com", "amemv.com", "video.twimg.com")
+DIRECT_URL_HOSTS = ("douyinvod.com", "365yg.com", "amemv.com", "video.twimg.com",
+                    "xhscdn.com", "rednotecdn.com")
 
 PLATFORM_RULES = [
     ("YouTube", r"(^|//)([a-z0-9-]+\.)*youtu\.?be"),
@@ -46,6 +47,17 @@ PLATFORM_RULES = [
     ("TikTok", r"(^|//)([a-z0-9-]+\.)*tiktok\.com"),
     ("X", r"(^|//)([a-z0-9-]+\.)*(x\.com|twitter\.com)"),
     ("Instagram", r"(^|//)([a-z0-9-]+\.)*instagram\.com"),
+    # 小红书。分享出来的多是 xhslink.cn 短链（.com 也存在），yt-dlp 带 Cookie
+    # 跟随跳转到 www.xiaohongshu.com/(explore|discovery/item)/<作品id> 再解析。
+    # 与安卓端 ytdlp_engine.PLATFORM_RULES 是同一份规格，改一处要同步另一处。
+    # 末尾那道「域名后必须是分隔符或结束」的检查：不加的话
+    # xhslink.cn.attacker.com 这种也会被判成小红书。上面几条没这道检查是
+    # 既有问题（见 docs/1.0.4-测试与安全演练报告.md 的 A1），不在此处一并改。
+    ("小红书", r"(^|//)([a-z0-9-]+\.)*(xiaohongshu\.com|xhslink\.(?:cn|com))(?![a-z0-9.-])"),
+    # 微博。实测（yt-dlp 自带样例）：weibo.com/tv/show、m.weibo.cn/status、
+    # weibo.com/<uid>/<mid> 三种形态都能开箱解析，不需要登录态。
+    # 与安卓端 ytdlp_engine.PLATFORM_RULES 同步。
+    ("微博", r"(^|//)([a-z0-9-]+\.)*(weibo\.com|weibo\.cn)(?![a-z0-9.-])"),
 ]
 
 
@@ -700,7 +712,9 @@ class Engine:
         抖音的分享链接 yt-dlp 解析不了，但它的直链已经由备用链路拿到并入库，
         所以下载时直接用那条直链；其他平台保持原样。
         """
-        if detect_platform(url) not in ("抖音", "X"):
+        # 小红书同样：分享链接 yt-dlp 解析不了，但直链已由浏览器取数入库。
+        # 与安卓端保持同一份规则，改一处要同步另一处。
+        if detect_platform(url) not in ("抖音", "X", "小红书"):
             return url
         for rec in self.store.all():
             if rec.get("source_url") == url:

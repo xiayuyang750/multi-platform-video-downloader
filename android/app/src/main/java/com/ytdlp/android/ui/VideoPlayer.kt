@@ -89,15 +89,22 @@ fun PlayerBox(
     // 拿到真实尺寸再切过去。
     var aspect by remember(video.id, source) { mutableStateOf(16f / 9f) }
 
+    // 纯音频没有「视频首帧」：onRenderedFirstFrame 不会触发，如果仍按首帧来决定
+    // 播放器透明度，播放器就永远停在 alpha=0 —— 既看不到控件，也没有进度条可拖
+    // （用户实测反馈：「音频能播放，但预览没有进度条」）。所以纯音频在点击播放后
+    // 直接把播放器显示出来，并让封面继续垫在底下当背景。
+    val audioOnly = video.playKind == "audio"
+
     val playerAlpha by animateFloatAsState(
-        targetValue = if (firstFrameReady) 1f else 0f,
+        targetValue = if (audioOnly) (if (playing) 1f else 0f) else (if (firstFrameReady) 1f else 0f),
         animationSpec = tween(durationMillis = 220),
         label = "player-alpha",
     )
     // 封面与播放器交叉淡出：首帧到位的同一时刻，封面才开始退场。
     // 「开始播放就立刻隐藏封面」是不行的 —— 那又回到了黑屏。
     val coverAlpha by animateFloatAsState(
-        targetValue = if (firstFrameReady) 0f else 1f,
+        // 纯音频的封面不淡出 —— 播放器是透明的，正好用封面当背景板
+        targetValue = if (audioOnly) 1f else if (firstFrameReady) 0f else 1f,
         animationSpec = tween(durationMillis = 220),
         label = "cover-alpha",
     )
@@ -137,6 +144,7 @@ fun PlayerBox(
             if (playing && source != null) {
                 ExoPlayerView(
                     source = source,
+                    audioOnly = audioOnly,
                     onFirstFrame = { firstFrameReady = true },
                     onVideoAspect = { aspect = it },
                     modifier = Modifier
@@ -234,6 +242,7 @@ private fun ExoPlayerView(
     onFirstFrame: () -> Unit,
     onVideoAspect: (Float) -> Unit,
     modifier: Modifier = Modifier,
+    audioOnly: Boolean = false,
 ) {
     val context = LocalContext.current
     // remember 块只执行一次，直接引用 onFirstFrame 会捕获首次组合时的 lambda；
@@ -302,8 +311,18 @@ private fun ExoPlayerView(
             PlayerView(ctx).apply {
                 this.player = player
                 useController = true
-                // 播放器背景保持黑色，与网页端 .player-video 一致
-                setShutterBackgroundColor(android.graphics.Color.BLACK)
+                if (audioOnly) {
+                    // 纯音频：把 PlayerView 的背景做成透明，让下面的封面透出来，
+                    // 并把控件设成「一直显示」—— 否则几秒后自动隐藏，用户就找不到
+                    // 进度条了（那正是反馈里的「没有进度条可拖」）。
+                    setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    controllerShowTimeoutMs = 0
+                    showController()
+                } else {
+                    // 播放器背景保持黑色，与网页端 .player-video 一致
+                    setShutterBackgroundColor(android.graphics.Color.BLACK)
+                }
             }
         },
         modifier = modifier,
@@ -427,13 +446,16 @@ fun GalleryBox(
                 } else {
                     Box(Modifier.fillMaxSize()) {
                         // 静态图先垫在底下：动效还没渲染出来时看得到画面，不会先黑一下
+                        //
+                        // Referer **按平台给**：抖音的图片 CDN 会校验它，不带会被拒；
+                        // 而小红书的图片带「别的站点的」Referer 反而会被拒 —— 实测就是
+                        // 预览区一直白屏、而下载（不带 Referer）却一切正常，差别只在这里。
+                        val imageReq = ImageRequest.Builder(context).data(item.url).crossfade(true)
+                        if (video.platform != "小红书") {
+                            imageReq.addHeader("Referer", "https://www.douyin.com/")
+                        }
                         AsyncImage(
-                            model = ImageRequest.Builder(context)
-                                .data(item.url)
-                                // 图片 CDN 会校验 Referer，不带会被拒（与下载链路一致）
-                                .addHeader("Referer", "https://www.douyin.com/")
-                                .crossfade(true)
-                                .build(),
+                            model = imageReq.build(),
                             contentDescription = null,
                             modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Fit,

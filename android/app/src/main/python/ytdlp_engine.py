@@ -43,8 +43,12 @@ CONFIG_FILE = BASE_DIR / "defaults.json"
 # 抖音这几个域名是实测出来的：采样 160 条直链，全部落在 365yg.com / amemv.com 上，
 # 一条 douyinvod.com 都没有 —— 只认 douyinvod.com 会让文件名退化成 URL 片段
 # （实测会变成「内部路径token [整个查询串].mp4」）。
+# 小红书（xhscdn.com / rednotecdn.com）是后加的：它的视频直链同样是「一个完整 mp4」，
+# 交给 yt-dlp 只会走通用提取器并报 Unsupported URL —— 界面上的表现就是
+# 「下载失败：不支持这种链接」（用户实测反馈）。走这条路还能顺带拿到 Range 分块并行。
 # 与 Windows 端 engine.DIRECT_URL_HOSTS 对应，改一处要同步另一处。
-DIRECT_URL_HOSTS = ("douyinvod.com", "365yg.com", "amemv.com", "video.twimg.com")
+DIRECT_URL_HOSTS = ("douyinvod.com", "365yg.com", "amemv.com", "video.twimg.com",
+                    "xhscdn.com", "rednotecdn.com")
 
 # 直链分块下载的读取粒度。太小会让线程调度开销盖过收益，1 MiB 是实测的折中。
 _DIRECT_READ = 1 << 20
@@ -58,6 +62,20 @@ PLATFORM_RULES = [
     ("TikTok", r"(^|//)([a-z0-9-]+\.)*tiktok\.com"),
     ("X", r"(^|//)([a-z0-9-]+\.)*(x\.com|twitter\.com)"),
     ("Instagram", r"(^|//)([a-z0-9-]+\.)*instagram\.com"),
+    # 小红书。App 里「复制链接」给的是 xhslink.cn 短链（实测 6 条真实分享链接
+    # 全部是 .cn；.com 也存在、同样跳向 xiaohongshu.com，所以两个都认）。
+    # 带 Cookie 时 yt-dlp 跟随跳转到 www.xiaohongshu.com/(explore|discovery/item)/<id>
+    # 再交给它的 XiaoHongShu 提取器 —— 实测视频类笔记 3/3 能解析。
+    # 这一条比上面几条多一道「域名后面必须是分隔符或结束」的检查：不加的话
+    # xhslink.cn.attacker.com 这种也会被判成小红书。上面几条没这道检查是
+    # 既有问题（见 docs/1.0.4-测试与安全演练报告.md 的 A1），不在此处一并改。
+    ("小红书", r"(^|//)([a-z0-9-]+\.)*(xiaohongshu\.com|xhslink\.(?:cn|com))(?![a-z0-9.-])"),
+    # 微博。实测（用 yt-dlp 自带的三个官方样例）：weibo.com/tv/show/<id>、
+    # m.weibo.cn/status/<id>、weibo.com/<uid>/<mid> 三种形态**都能开箱解析**
+    # （1080p / 720p 档位齐全，不需要登录态）。
+    # 注意：微博分享里的 `t.cn` 短链**没认** —— t.cn 是新浪的通用短链，
+    # 认了会把非微博内容也判成微博；等拿到真实分享链接再决定。
+    ("微博", r"(^|//)([a-z0-9-]+\.)*(weibo\.com|weibo\.cn)(?![a-z0-9.-])"),
 ]
 
 # 安卓文件名硬上限是 255 **字节**（ext4 / FUSE 的限制都是按字节算的）。
@@ -541,6 +559,45 @@ PLATFORM_ERROR_HINTS = {
         "404": "视频不存在或已被删除。",
         "timed out": "连不上 B站，请检查网络。",
     },
+    # 小红书。实测拿到的是两种完全不同的报错，成因也不同，所以分开写：
+    #   ① 没导入 Cookie：分享短链会被 302 到 www.xiaohongshu.com/login?redirectPath=…
+    #      那个地址没有对应提取器，yt-dlp 报 Unsupported URL；
+    #   ② 已导入 Cookie 且笔记确实没有视频（type=normal 的图文 / 图集 / 实况图合集）：
+    #      笔记数据能读到，但 video 段为空，报 No video formats found。
+    #      ——同样的报错也可能是 Cookie 失效（未登录时它不下发笔记数据，
+    #        实测 noteDetailMap 为空、loggedIn=false），所以文案里两句都要给。
+    "小红书": {
+        # 「不带 Cookie 时…」这种写法被实测证伪过一次：用户明明导入了 Cookie，
+        # 提示却说他没导入（同一份会话被平台标记后，PC 与手机一样会被送到登录页）。
+        # 后来又实测到第二种形态：**新登录的会话，第一条自动化请求就被送进验证码页**
+        # （website-login/captcha）—— 所以这句不能把成因写死成「没导入」。
+        "Unsupported URL": "小红书这次没过平台校验：请求被送到了登录页或验证码页。"
+                           "① 还没导入 Cookie → 到「设置 → Cookie 文件」"
+                           "导入一份已登录小红书的 cookies.txt；"
+                           "② 已导入仍这样 → 平台把这次请求判成了自动化："
+                           "先别连着试（试得越密越容易被拦），隔一段时间再来，"
+                           "必要时重新登录小红书再重新导出 Cookie。",
+        "No video formats found": "这条笔记没有视频（图文 / 图集 / 实况图类），"
+                                  "本应用目前只解析视频。如果是视频笔记也报这句，"
+                                  "那多半是 Cookie 没导入或已失效 —— 重新导入一次即可。",
+        "403": "小红书拒绝了这次请求。常见原因是没带登录态（导入 Cookie 再试），"
+               "或者开着全局代理 —— 它是国内站点，走境外节点反而会被拦。",
+        "404": "这条笔记不存在或已被删除。",
+        "timed out": "连不上小红书。它是国内站点，全局代理开着反而会被拦，"
+                     "请改成「规则 / 智能分流」或直连模式。",
+    },
+    # 微博只写语义明确的两种（404 / 超时）。403 的具体成因还没实测过，
+    # 不猜 —— 让它走通用兜底，那里已经把「需要登录 / 已删除 / 改版」都列了。
+    "微博": {
+        "404": "这条微博不存在或已被删除。",
+        "timed out": "连不上微博，请检查网络。",
+        # 实测：图文 / 图集 / 实况图 / 动图本来就没有视频轨，yt-dlp 只会报这一句。
+        # 现在这类内容会自动转去浏览器模式；万一浏览器模式也没取到，至少别让用户
+        # 以为是「站点改版」。
+        "no video formats found":
+            "这条微博里没有视频格式 —— 图文 / 图集 / 实况图本来就没有视频轨。"
+            "如果这是视频帖，才可能是站点改版了。",
+    },
 }
 
 
@@ -849,6 +906,71 @@ def _writable(path: str) -> bool:
 # ==================== 引擎 ====================
 
 
+def _xhs_stream_entries(video_json: str) -> list:
+    """把 `video.media.stream` 摊平成候选列表（保留原始字段）。"""
+    try:
+        video = json.loads(video_json or "{}")
+    except Exception:  # noqa: BLE001
+        return []
+    stream = ((video.get("media") or {}).get("stream")) or {}
+    if not isinstance(stream, dict):
+        return []
+    flat = []
+    for rows in stream.values():
+        if isinstance(rows, list):
+            flat.extend(i for i in rows if isinstance(i, dict) and i.get("masterUrl"))
+    return flat
+
+
+def _xhs_is_muxed(entry: dict) -> bool:
+    """这条候选是不是「画面+声音」合流的。
+
+    实测判据（真机抓到的字段）：合流条 `format:"mp4"` 且 audioCodec="aac"、
+    audioChannels=2、audioBitrate=64010；纯视频条（DASH 分片）`format:"fmp4"`、
+    audioChannels=0、audioBitrate=0。
+    """
+    if int(entry.get("audioChannels") or 0) > 0:
+        return True
+    if int(entry.get("audioBitrate") or 0) > 0:
+        return True
+    codec = str(entry.get("audioCodec") or "").lower()
+    return codec not in ("", "none")
+
+
+def _xhs_pick_video(video_json: str) -> tuple:
+    """从小红书笔记的 `video` 段里挑一条直链，返回 (播放地址, 下载地址, 是否带声音)。
+
+    结构（真机实测）：
+        video.media.stream = {"EF4": [ {masterUrl, width, height, size, format,
+                                       audioCodec, audioChannels, audioBitrate,
+                                       videoCodec, qualityType, streamDesc, …} ], …}
+    注意键名是**平台自己的编码编号**（EF4 / EF5 / …），不是 h264 / h265，
+    所以按编码名挑是挑不中的。
+
+    挑法（按实测结论，不是推测）：
+      1. **优先「带音轨」的那条**（[_xhs_is_muxed]）。同一支视频里既有合流的
+         mp4，也有纯画面的 fmp4 分片；只看「高度最高」会挑中纯画面的那条 ——
+         用户下载下来是个**没声音**的文件（实测 ffprobe 只有一条 hevc 视频流）。
+      2. 合流条里取高度最大的。
+      3. 一条合流的都没有时，退回「高度最大」的纯画面条 —— 有画面总比没有好，
+         但会把「没声音」如实回报给界面（第三个返回值）。
+    """
+    entries = _xhs_stream_entries(video_json)
+    if not entries:
+        return "", "", False
+
+    def by_height(rows: list) -> dict:
+        return sorted(rows, key=lambda i: (int(i.get("height") or 0),
+                                           int(i.get("size") or 0)), reverse=True)[0]
+
+    muxed = [e for e in entries if _xhs_is_muxed(e)]
+    if muxed:
+        url = by_height(muxed).get("masterUrl") or ""
+        return url, url, True
+    url = by_height(entries).get("masterUrl") or ""
+    return url, url, False
+
+
 class Engine:
     def __init__(self, data_dir: Path, ffmpeg_path: str, qjs_path: str,
                  preferred_dir: str, fallback_dir: str) -> None:
@@ -1021,8 +1143,14 @@ class Engine:
             return "\n提示：该平台需要 Cookie 才能解析，但你还没导入 Cookie 文件（可在「设置」里选择）。"
         if not os.path.isfile(path):
             return f"\n提示：已导入的 Cookie 文件找不到了（{path}），请重新导入。"
-        # 文件在、仍然失败，多半就是里面的登录态过期了
         low = (err or "").lower()
+        # 平台把请求送进登录页 / 验证码页时，成因是「这次请求被判成了自动化」，
+        # 而不是「Cookie 过期」——此时再附一句「Cookie 可能已过期」会把人带偏
+        # （实测：用户刚重新登录、导入的是全新 Cookie，界面照样收到这句）。
+        # 这里让位给平台专属提示，不再叠加。
+        if "website-login/captcha" in low or "/login?redirectpath" in low:
+            return ""
+        # 文件在、仍然失败，多半就是里面的登录态过期了
         if any(k in low for k in ("no video could be found", "not authorized",
                                  "401", "403", "login", "fresh cookies")):
             return ("\n提示：Cookie 可能已过期。请重新导出并导入 —— "
@@ -1052,6 +1180,36 @@ class Engine:
         # 加登录态，HTTP 客户端两样都拿不到，yt-dlp 必然 403 —— 先跑纯粹是白等。
         if platform == "抖音":
             return self._parse_douyin(url)
+
+        # 小红书同理，直接交给**应用内置浏览器**，不再先跑 yt-dlp。
+        # 曾经它是「先 yt-dlp（带用户导出的 Cookie）、失败才浏览器」，现在去掉前半段，
+        # 两个理由：
+        #   ① 继续拿那份导出 Cookie 去打小红书，会让**用户的账号**被平台判成自动化
+        #      （实测：验证码 → 送登录页 → 连 web 端和手机 App 一起被登出）；
+        #   ② 浏览器链路本来就全覆盖（视频 / 图文 / 图集 / 实况图），先跑一遍
+        #      yt-dlp 只是白等几秒。
+        if platform == "小红书":
+            return {
+                "ok": False,
+                "need_webview": True,
+                "webview_kind": "xhs",
+                "platform": "小红书",
+                "source_url": url,
+                "error": "小红书走内置浏览器解析（首次需要在小红书窗口里登录一次，"
+                         "之后不用再登录）。",
+            }
+
+        # 微博头条文章是另一种页面（`weibo.com/ttarticle/...`，文章 id 还在 `#`
+        # 后面）—— yt-dlp 没有任何提取器认它，直接交给浏览器模式。
+        if platform == "微博" and "ttarticle" in url:
+            return {
+                "ok": False,
+                "need_webview": True,
+                "webview_kind": "weibo",
+                "platform": "微博",
+                "source_url": url,
+                "error": "正在用浏览器模式读取这条头条文章。",
+            }
 
         # X 把顺序反过来：**先**走第三方链路，yt-dlp 退居兜底。
         # 原因：FxTwitter 一次能把整条推文里的所有媒体都拿到（多张图、多个视频、
@@ -1085,6 +1243,32 @@ class Engine:
                 # 走到这儿说明第三方和 yt-dlp 都失败了，两段原因都要给出来
                 tip = friendly_error(raw, platform) + self._cookie_hint(url, raw)
                 return {"ok": False, "error": (x_err + "\n" if x_err else "") + tip}
+            if platform == "小红书":
+                # 正常走不到这里了（小红书在上面就短路成浏览器模式）。
+                # 留着是因为 yt-dlp 那条路的**报错翻译**（PLATFORM_ERROR_HINTS）与
+                # 「登录页 / 验证码页」的判据在排查时仍有参考价值。
+                return {
+                    "ok": False,
+                    "need_webview": True,
+                    "webview_kind": "xhs",
+                    "platform": "小红书",
+                    "source_url": url,
+                    "error": "小红书已自动改用内置浏览器模式解析"
+                             "（首次需要在小红书窗口里登录一次，之后不用再登录）。",
+                }
+            if platform == "微博" and "no video formats" in raw.lower():
+                # 微博的图文 / 图集 / 实况图 / 动图本来就没有视频流，yt-dlp 只会报
+                # `No video formats found!`（用户实测 12 条里 9 条都是这个）。
+                # 这类内容交给浏览器模式去读页面数据 —— 不是「站点改版」，是
+                # 这条 yt-dlp 链路本来就只覆盖视频。
+                return {
+                    "ok": False,
+                    "need_webview": True,
+                    "webview_kind": "weibo",
+                    "platform": "微博",
+                    "source_url": url,
+                    "error": "这条微博是图文 / 图集类内容，正在改用浏览器模式读取。",
+                }
             return {
                 "ok": False,
                 "error": friendly_error(raw, platform) + self._cookie_hint(url, raw),
@@ -1234,6 +1418,87 @@ class Engine:
             **self._with_local_path(rec),
             "quality": quality,
             "filesize": "",
+        }
+
+    def save_xhs(self, payload_json: str) -> dict:
+        """小红书：接收 Kotlin 侧 WebView 取到的笔记数据并入库。"""
+        return self._save_webview_note(payload_json, "小红书")
+
+    def save_weibo(self, payload_json: str) -> dict:
+        """微博：接收 Kotlin 侧 WebView 取到的正文数据并入库。
+
+        微博**不做档位选择**（移动版详情页只给一份图/视频），tiers 为空。
+        """
+        return self._save_webview_note(payload_json, "微博")
+
+    def _save_webview_note(self, payload_json: str, platform: str) -> dict:
+        """浏览器取数的统一入库口（小红书 / 微博共用）。
+
+        返回结构与 parse_url 成功时一致，界面无需区别对待。
+
+        两条链路的差别只有「视频直链从哪来」：
+          · 小红书：`video_raw` 里是一堆候选流，要按「优先带音轨」挑（见 _xhs_pick_video）；
+          · 微博：`video_url` 就是页面给的那一条。
+        """
+        data = json.loads(payload_json)
+        url = (data.get("source_url") or "").strip()
+        media = data.get("media") or []
+        ctype = data.get("content_type") or "video"
+        count = len(media)
+
+        # 「合集类」笔记（仅小红书）：平台把它自己做成了一个视频（type=video），
+        # 但笔记里还带着一整组图。用户要的是那组图，不是平台合成的视频，所以
+        # **优先按图集给**。判据（实测）：真正的视频笔记 imageList 恰好只有 1 张
+        # （就是封面），所以「带 ≥2 张图」就能把合集和普通视频分开。
+        if platform == "小红书" and ctype == "video" and count >= 2:
+            ctype = "live" if any((m or {}).get("live") for m in media) else "images"
+
+        play_url = download_url = ""
+        has_audio = True
+        if ctype == "video":
+            if platform == "小红书":
+                play_url, download_url, has_audio = _xhs_pick_video(
+                    data.get("video_raw") or ""
+                )
+            else:
+                play_url = download_url = data.get("video_url") or ""
+
+        rec = {
+            "id": str(data.get("id") or url),
+            "platform": platform,
+            "title": data.get("title") or "",
+            "uploader": data.get("uploader") or "",
+            "uploader_id": data.get("uploader_id") or "",
+            "duration": data.get("duration"),
+            # 图文类的封面就是第一张图
+            "thumbnail": data.get("thumbnail") or "",
+            "source_url": url,
+            "resolved_url": play_url,
+            "download_url": download_url,
+            "resolved_at": int(time.time()),
+            "play_kind": "progressive" if play_url else "none",
+            "content_type": ctype,
+            # 图文/图集/实况图是**多条**媒体，塞不进 resolved_url，单独存一份 JSON
+            "media_json": json.dumps(media, ensure_ascii=False) if media else "",
+            "tiers": [],
+            "source_md5": "",
+        }
+        self.store.upsert(rec)
+        if ctype == "images":
+            quality = f"图文 · 共 {count} 张"
+        elif ctype == "live":
+            quality = f"实况图 · 共 {count} 张"
+        else:
+            # 如实说清「有没有声音」：小红书这类内容里的纯画面流（DASH 分片）
+            # 本身就没有音轨，用户看到「无声」才不会被当成播放器坏了。
+            quality = ("原始画质（浏览器取数）" if has_audio
+                       else "原始画质（浏览器取数 · 该条只有画面，无音轨）")
+        return {
+            "ok": True,
+            **self._with_local_path(rec),
+            "quality": quality,
+            "filesize": "",
+            "tiers": [],
         }
 
     def save_douyin(self, payload_json: str) -> dict:
@@ -1387,7 +1652,11 @@ class Engine:
         if spec and spec.get("url"):
             return spec["url"]
 
-        if detect_platform(url) not in ("抖音", "X"):
+        # 小红书必须在这里：它的分享链接（xhslink.cn 短链）yt-dlp 已经解析不了了
+        # （要么被风控、要么只有图文），但**直链已经由浏览器取数入库**。
+        # 漏掉它的后果实测过：下载会拿原始短链去喂 yt-dlp，报 Unsupported URL，
+        # 界面上的表现就是「下载失败：不支持这种链接」。
+        if detect_platform(url) not in ("抖音", "X", "小红书"):
             return url
         for rec in self.store.all():
             if rec.get("source_url") == url:
@@ -2145,7 +2414,21 @@ class Engine:
 
         顺序不能换：写进库的 local_path 必须是**最终成品**，否则历史页放的是那份
         已经被替换掉的旧文件，播放会失败、看着像下载坏了。
+
+        另外：**磁盘上没有产物就不能报「完成」**。实测反馈过一种情况（微博的
+        「音视频分轨」内容）：界面显示下载完成，但相册里没有新文件、播放区也一直
+        白屏 —— 根因就是这里以前无条件报 done、并且把 local_path 记成了空串。
+        现在改成如实报错，用户至少知道「这次没下来」而不是以为成功了。
         """
+        if not path or not os.path.isfile(path):
+            self.dl_state.update(
+                type="error", active=False,
+                message="下载结束了，但磁盘上没有找到成品文件。\n"
+                        "常见原因：这条内容的音频和视频是分开给的、合流失败，"
+                        "或选中的档位已经失效 —— 换个档位或重试一次通常就好。",
+            )
+            return
+
         before = after = ""
         try:
             if path and os.path.isfile(path):
@@ -2249,6 +2532,12 @@ class Engine:
     def _to_record(info: dict, fallback_url: str) -> dict:
         source = info.get("webpage_url") or fallback_url
         play_url = Engine._pick_playable_url(info)
+        play_kind = "progressive" if play_url else "none"
+        if not play_url:
+            # 纯音频：没有合流轨，但音频本身可以直接播（播放器会给进度条）
+            audio_url = Engine._pick_audio_url(info)
+            if audio_url:
+                play_url, play_kind = audio_url, "audio"
         return {
             "id": str(info.get("id") or ""),
             "platform": detect_platform(source),
@@ -2263,7 +2552,7 @@ class Engine:
             "resolved_url": play_url,
             "download_url": "",  # yt-dlp 路径自己会选格式，不需要单独指定
             "resolved_at": int(time.time()),
-            "play_kind": "progressive" if play_url else "none",
+            "play_kind": play_kind,
         }
 
     def _with_local_path(self, rec: dict) -> dict:
@@ -2287,6 +2576,29 @@ class Engine:
         if path and os.path.exists(path):
             rec["local_path"] = path
         return rec
+
+    @staticmethod
+    def _pick_audio_url(info: dict) -> str:
+        """纯音频内容：挑一条能直接喂给播放器的音频地址。
+
+        为什么单独做：[_pick_playable_url] 要求「音视频都在」，纯音频会被排除，
+        于是解析完拿不到在线地址、界面只能说「需下载后才能播放」—— 其实它**本来
+        就能直接播**，只是被那条规则挡掉了（用户实测反馈过这类内容）。
+
+        判据要严：必须 `vcodec == "none"` 且 acodec 是真实编码。`vcodec` 为 null
+        表示「未知」（X 的渐进式 mp4 就是这种），不能当成纯音频。
+        """
+        for fmt in info.get("formats") or []:
+            if not fmt.get("url"):
+                continue
+            if fmt.get("vcodec") != "none":
+                continue
+            if fmt.get("acodec") in (None, "none"):
+                continue
+            if str(fmt.get("protocol") or "").startswith("m3u8"):
+                continue
+            return fmt.get("url") or ""
+        return ""
 
     @staticmethod
     def _pick_playable_url(info: dict) -> str:
@@ -2437,3 +2749,13 @@ def clear_all_history() -> str:
 def save_douyin(payload_json: str) -> str:
     """由 Kotlin 侧的 WebView 解析页调用：把取到的抖音数据入库并回传记录。"""
     return json.dumps(_get().save_douyin(payload_json), ensure_ascii=False)
+
+
+def save_xhs(payload_json: str) -> str:
+    """由 Kotlin 侧的 WebView 解析页调用：把取到的小红书笔记入库并回传记录。"""
+    return json.dumps(_get().save_xhs(payload_json), ensure_ascii=False)
+
+
+def save_weibo(payload_json: str) -> str:
+    """由 Kotlin 侧的 WebView 解析页调用：把取到的微博正文入库并回传记录。"""
+    return json.dumps(_get().save_weibo(payload_json), ensure_ascii=False)

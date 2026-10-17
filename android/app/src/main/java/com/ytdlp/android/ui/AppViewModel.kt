@@ -41,10 +41,17 @@ sealed interface ParseUi {
     data class Failed(val message: String) : ParseUi
 
     /**
-     * 需要走浏览器模式（目前只有抖音）。
-     * 界面收到它就去拉起 DouyinActivity，解析完再回调 onDouyinResult。
+     * 需要走浏览器模式（抖音、小红书）。
+     * 界面收到它就去拉起对应的 WebView 解析页，解析完再回调
+     * [onDouyinResult] 或 [onXhsResult]。
+     *
+     * @param kind 用哪个解析页：`douyin` / `xhs`，来自引擎的 `webview_kind`。
      */
-    data class NeedBrowser(val url: String, val message: String) : ParseUi
+    data class NeedBrowser(
+        val url: String,
+        val message: String,
+        val kind: String = "douyin",
+    ) : ParseUi
 }
 
 /** 历史页的状态。platform 为 null 表示「全部」标签。 */
@@ -250,8 +257,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         ParseUi.Done(r.info)
                     }
                     is Engine.ParseResult.Err -> if (r.needWebview) {
-                        // 抖音：交给界面的 WebView 解析页继续
-                        ParseUi.NeedBrowser(target, r.message)
+                        // 抖音 / 小红书：交给界面的 WebView 解析页继续
+                        ParseUi.NeedBrowser(
+                            target,
+                            r.message,
+                            r.webviewKind.ifBlank { "douyin" },
+                        )
                     } else {
                         ParseUi.Failed(r.message)
                     }
@@ -266,17 +277,43 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * @param payloadJson 取到的数据（null 表示没取到）
      * @param reason 没取到时的原因，由解析页给出
      */
-    fun onDouyinResult(payloadJson: String?, reason: String) {
+    fun onDouyinResult(payloadJson: String?, reason: String) = onWebviewResult(
+        payloadJson, reason, "浏览器模式没能取到视频数据。",
+    ) { Engine.saveDouyin(ctx, it) }
+
+    /**
+     * 小红书 WebView 解析页返回后的回调。
+     *
+     * 与抖音那条的区别只有「交给引擎哪个入库入口」（小红书那条多一种图集形态），
+     * 后续处理完全一样，所以两边共用一个实现。
+     */
+    fun onXhsResult(payloadJson: String?, reason: String) = onWebviewResult(
+        payloadJson, reason, "浏览器模式没能取到这条笔记的数据。",
+    ) { Engine.saveXhs(ctx, it) }
+
+    /**
+     * 微博 WebView 解析页返回后的回调。
+     *
+     * 与上面两条的差别只在「交给引擎哪个入库入口」。
+     */
+    fun onWeiboResult(payloadJson: String?, reason: String) = onWebviewResult(
+        payloadJson, reason, "浏览器模式没能取到这条微博的数据。",
+    ) { Engine.saveWeibo(ctx, it) }
+
+    private fun onWebviewResult(
+        payloadJson: String?,
+        reason: String,
+        fallbackReason: String,
+        save: (String) -> Engine.ParseResult,
+    ) {
         if (payloadJson == null) {
-            _parse.value = ParseUi.Failed(
-                reason.ifBlank { "浏览器模式没能取到视频数据。" }
-            )
+            _parse.value = ParseUi.Failed(reason.ifBlank { fallbackReason })
             return
         }
         _parse.value = ParseUi.Loading
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                runCatching { Engine.saveDouyin(ctx, payloadJson) }
+                runCatching { save(payloadJson) }
             }
             _parse.value = when {
                 result.isFailure -> ParseUi.Failed(

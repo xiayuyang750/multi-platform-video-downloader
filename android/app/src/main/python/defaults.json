@@ -26,6 +26,11 @@
     "twitter.com": { "use_cookies": true, "reason": "同上，短链同属 X" },
     "instagram.com": { "use_cookies": true, "reason": "Instagram 需要登录态，未登录会要求 fresh cookies" },
     "douyin.com": { "use_cookies": false, "status": "webview", "reason": "yt-dlp 走不通（须 a_bogus 签名 + 登录态）。安卓端改用 WebView 监听接口响应拿无水印直链，不需要 cookie" },
-    "tiktok.com": { "use_cookies": true, "reason": "TikTok 要登录态，未登录常报 fresh cookies。v1.0.3 才补上这一项 —— 此前整项缺失，use_cookies 取不到值，导致导入的 cookies.txt 对 TikTok 完全不生效。注意：尚未在真机上实测，且能否访问还取决于所在地区" }
+    "tiktok.com": { "use_cookies": true, "reason": "TikTok 要登录态，未登录常报 fresh cookies。v1.0.3 才补上这一项 —— 此前整项缺失，use_cookies 取不到值，导致导入的 cookies.txt 对 TikTok 完全不生效。注意：尚未在真机上实测，且能否访问还取决于所在地区" },
+    "xiaohongshu.com": { "use_cookies": false, "reason": "小红书改走**应用内置浏览器**取数：用户在那个窗口里登录一次即可，不再使用导出的 cookies.txt。实测「导出的 Cookie + 非浏览器请求」会被平台判成自动化（验证码／送登录页／把用户账号登出），所以这条路径已弃用" },
+    "xhslink.cn": { "use_cookies": false, "reason": "同上，短链同属小红书。App 分享出来的就是这个域名（实测 6 条真实分享链接全部是 .cn）" },
+    "xhslink.com": { "use_cookies": false, "reason": "同上，.com 这个短链域名也存在、同样跳向 xiaohongshu.com" },
+    "weibo.com": { "use_cookies": false, "reason": "实测（yt-dlp 自带样例）：weibo.com/tv/show、m.weibo.cn/status、weibo.com/<uid>/<mid> 三种形态不带 Cookie 都能解析出 1080p/720p 档位，不需要登录态" },
+    "weibo.cn": { "use_cookies": false, "reason": "同上，移动版域名（m.weibo.cn）同样不需要 Cookie" }
   }
 }

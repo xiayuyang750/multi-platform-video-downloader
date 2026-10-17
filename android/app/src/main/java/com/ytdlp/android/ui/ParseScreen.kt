@@ -67,6 +67,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ytdlp.android.DouyinActivity
+import com.ytdlp.android.WeiboActivity
+import com.ytdlp.android.XhsActivity
 
 /** 解析页：贴链接 → 出结果 → 下载。对应网页端的第一个视图。 */
 @Composable
@@ -104,6 +106,29 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
         vm.onDouyinResult(
             result.data?.getStringExtra(DouyinActivity.EXTRA_PAYLOAD),
             result.data?.getStringExtra(DouyinActivity.EXTRA_REASON).orEmpty(),
+        )
+    }
+
+    // 小红书的浏览器模式解析页。与抖音那条的区别：需要登录时这个窗口会**露出来**
+    // 让用户就地登录一次（之后长期有效），所以它不只是个后台窗口。
+    val xhsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        vm.onXhsResult(
+            result.data?.getStringExtra(XhsActivity.EXTRA_PAYLOAD),
+            result.data?.getStringExtra(XhsActivity.EXTRA_REASON).orEmpty(),
+        )
+    }
+
+    // 微博的浏览器模式解析页：图文 / 图集 / 实况图 / 动图走这里。
+    // 它和抖音一样是**完全隐形**的（alpha=0，不露给用户），因为微博不需要登录；
+    // 真实浏览器会自动过掉微博的「访客系统」。
+    val weiboLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        vm.onWeiboResult(
+            result.data?.getStringExtra(WeiboActivity.EXTRA_PAYLOAD),
+            result.data?.getStringExtra(WeiboActivity.EXTRA_REASON).orEmpty(),
         )
     }
 
@@ -223,10 +248,10 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
 
             Hint(
                 "支持直接粘贴整段分享文案，会自动提取其中的链接。\n" +
-                    // 加「等」是必要的：实际认哪些站点由底层的 yt-dlp 决定，
-                    // 下面这六个只是我们实测过的，写死成「只支持这六个」不属实。
-                    "支持 YouTube / B站 / 抖音 / TikTok / X / Instagram 等平台" +
-                    "（底层是 yt-dlp，能认的远不止这几个）。境外站点需要开着 VPN。"
+                    // 加「等」是必要的：除这几家之外还有不少站点能认，
+                    // 写死成「只支持这几个」不属实。
+                    "支持 YouTube / B站 / 抖音 / TikTok / X / Instagram / 小红书 / 微博 等平台。" +
+                    "境外站点需要开着 VPN。"
             )
         }
 
@@ -269,11 +294,15 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
             }
 
             is ParseUi.NeedBrowser -> {
-                // 抖音这类需要走内置浏览器的内容：在后台拉起那个（用户看不到的）
-                // 窗口去取数据，界面上就停在这里转圈，取到后直接换成结果卡片。
+                // 抖音 / 小红书这类需要走内置浏览器的内容：拉起对应的解析页去取数据，
+                // 界面上就停在这里转圈，取到后直接换成结果卡片。
                 // 用 url 做 key，避免重组时反复拉起。
-                LaunchedEffect(state.url) {
-                    douyinLauncher.launch(DouyinActivity.intent(context, state.url))
+                LaunchedEffect(state.url, state.kind) {
+                    when (state.kind) {
+                        "xhs" -> xhsLauncher.launch(XhsActivity.intent(context, state.url))
+                        "weibo" -> weiboLauncher.launch(WeiboActivity.intent(context, state.url))
+                        else -> douyinLauncher.launch(DouyinActivity.intent(context, state.url))
+                    }
                 }
                 Card {
                     Row(
@@ -285,10 +314,26 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                             strokeWidth = 2.dp,
                             color = tone.accent,
                         )
-                        Text("正在解析该视频…", fontSize = Font.body, color = tone.textMuted)
+                        Text(
+                            when (state.kind) {
+                                "xhs" -> "正在用内置浏览器解析这条笔记…"
+                                "weibo" -> "正在用内置浏览器读取这条微博…"
+                                else -> "正在解析该视频…"
+                            },
+                            fontSize = Font.body,
+                            color = tone.textMuted,
+                        )
                     }
                     Spacer12()
-                    Hint("这条内容需要多等几秒，请稍候。")
+                    Hint(
+                        when (state.kind) {
+                            "xhs" ->
+                                "小红书需要登录态 —— 首次会弹出登录页，登录一次即可（之后不必再登录）。"
+                            "weibo" ->
+                                "微博的图文 / 图集 / 实况图需要多等几秒，请稍候。"
+                            else -> "这条内容需要多等几秒，请稍候。"
+                        }
+                    )
                 }
             }
 
@@ -459,12 +504,6 @@ private fun ResultCard(
                     enabled = !download.active,
                     modifier = Modifier.weight(1f),
                 )
-            } else {
-                GhostButton(
-                    text = "复制链接",
-                    onClick = onCopy,
-                    modifier = Modifier.weight(1f),
-                )
             }
             // 档位选择器放最右：它是次要操作，靠边不抢下载按钮的位置。
             // 只有一个档位等于没得选，不显示；图文 / 图集 / 实况图本身没有档位。
@@ -478,18 +517,20 @@ private fun ResultCard(
             }
         }
 
-        if (video.isGallery) {
-            Spacer(Modifier.height(Dim.gap))
-            GhostButton(
-                text = "复制链接",
-                onClick = onCopy,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
+        Spacer(Modifier.height(Dim.gap))
+
+        // 「复制链接」单独占一整行（与「打开原视频」同款）。
+        // 原先它挤在上面那一行里，档位选择器一出现（抖音这类多档位平台）就被压得
+        // 只剩很窄一条，中文被折成两行 —— 用户反复反馈过。放成整行就不存在被挤的问题。
+        GhostButton(
+            text = "复制链接",
+            onClick = onCopy,
+            modifier = Modifier.fillMaxWidth(),
+        )
 
         Spacer(Modifier.height(Dim.gap))
 
-        // 打开原视频单独占一行：三个按钮并排时中文会被挤到换行
+        // 打开原视频也单独占一行，理由同上
         GhostButton(
             text = "打开原视频",
             onClick = onOpenSource,
