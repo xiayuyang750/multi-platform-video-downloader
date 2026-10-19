@@ -258,6 +258,8 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 onClick = { uriHandler.openUriSafe(VPN_TOOL_URL) },
                 modifier = Modifier.fillMaxWidth(),
             )
+            Spacer12()
+            Hint("网盘分享页，提取码 ${VPN_TOOL_CODE}。")
         }
 
         // ---- 版本更新 ----
@@ -396,16 +398,14 @@ private const val DOUYIN_TOOL_URL =
     "https://github.com/xiayuyang750/watermark-tool/releases/tag/v0.4.0"
 
 /**
- * VPN 加速器的下载地址。
+ * VPN 加速器的分享链接与提取码。
  *
  * 为什么需要它：授权验证跑在 Cloudflare Workers 上，国内网络直连不了。
  * 用户第一次激活必须先开 VPN，而「没有 VPN 就下载不了 VPN」是个死循环，
- * 所以这个入口必须放在国内能打开的地址上。
- *
- * 当前先指向 GitHub Releases，等上传完成后换成国内网盘（蓝奏云 / 123 云盘）的分享链接。
+ * 所以这个入口必须放在国内打得开的地址上 —— GitHub 在国内打不开，故用网盘分享。
  */
-private const val VPN_TOOL_URL =
-    "https://github.com/xiayuyang750/watermark-tool/releases"
+private const val VPN_TOOL_URL = "https://wwbuo.lanzouq.com/iTELV4claq7g"
+private const val VPN_TOOL_CODE = "8888"
 
 /** 与 Windows 端保持一致（main.py 的 FEEDBACK_MAIL）。 */
 private const val FEEDBACK_MAIL = "xiayuyang750@gmail.com"
