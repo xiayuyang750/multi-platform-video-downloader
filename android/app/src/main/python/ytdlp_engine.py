@@ -148,6 +148,17 @@ DOUYIN_APP_UA = (
 
 DOUYIN_FEED_API = "https://aweme.snssdk.com/aweme/v1/feed/?aweme_id={id}"
 
+# 必须随请求带上这些「App 公共参数」，否则接口会对**部分**作品忽略 aweme_id，
+# 直接把推荐流当结果返回（实测：橱窗视频 7688382195358027034 不带参数时连打 5 次
+# 全部拿不到目标，返回的是随机推荐作品；带上参数后连打 4 次 4 次命中，
+# 且作者/标题/档位都与分享链接一致）。这些值都是客户端公开参数，不含任何密钥。
+DOUYIN_COMMON_PARAMS = (
+    "aid=1128&device_platform=android&channel=googleplay&os_version=12"
+    "&version_code=260201&version_name=26.2.1&device_type=Pixel%204"
+    "&device_brand=google&os_api=31&resolution=1080*2340&dpi=420"
+    "&language=zh&ac=wifi&update_version_code=260201"
+)
+
 # 展开分享短链时用的普通浏览器 UA
 _BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1311,9 +1322,10 @@ class Engine:
         桌面版 UA 才成。又慢又脆，用户那次失败就是这么来的。
 
         对比参考实现后找到了根因：抖音有一个不用签名、不用登录的公开接口，
-        只需把 UA 伪装成抖音 App 自身：
+        只需把 UA 伪装成抖音 App 自身、并带上 App 的公共参数：
             https://aweme.snssdk.com/aweme/v1/feed/?aweme_id=<作品ID>
         实测直连 HTTP 200、秒回，返回的 aweme_list 里就有标题/作者/直链/码率档位。
+        公共参数不能省 —— 少了它接口会对部分视频忽略 aweme_id（见 DOUYIN_COMMON_PARAMS）。
         所以把它作为主方案，WebView 退居兜底（接口哪天被关掉还能顶上）。
         """
         try:
@@ -1345,7 +1357,7 @@ class Engine:
             raise RuntimeError("没能从链接里识别出作品编号")
 
         req = urllib.request.Request(
-            DOUYIN_FEED_API.format(id=vid),
+            DOUYIN_FEED_API.format(id=vid) + "&" + DOUYIN_COMMON_PARAMS,
             headers={"User-Agent": DOUYIN_APP_UA},
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
@@ -1355,8 +1367,13 @@ class Engine:
         if not items:
             raise RuntimeError("接口没有返回作品数据（可能作品已删除或设为私享）")
 
-        # 这个接口是「推荐流」性质的：只有**视频**会被原样带回，图文/图集/实况图
-        # 这类「笔记」它不服务 —— 此时 items 里全是推荐作品，目标 id 不在其中。
+        # 这个接口是「推荐流」性质的：它以 aweme_id 作为种子拉一条 feed，
+        # 种子作品可服务时会被原样带回（实测排在返回列表第一位），其余是推荐作品。
+        # 目标 id 不出现只有两种可能：
+        #   1) 图文 / 图集 / 实况图这类「笔记」—— 接口不服务；
+        #   2) 视频本身取不到（已删除 / 仅自己可见 / 权限受限）。
+        # 另有一种「接口直接忽略 aweme_id 只回推荐流」的情况（实测橱窗视频），
+        # 已由 DOUYIN_COMMON_PARAMS 修掉，不要再删那串参数。
         #
         # 绝不能退回 items[0]：实测 7 条不同的图集/实况图链接会拿到**同一条无关视频**，
         # 而界面显示「解析成功」，用户会把别人的视频当成自己的内容下走（伪成功）。
@@ -1367,7 +1384,8 @@ class Engine:
         )
         if target is None:
             raise RuntimeError(
-                f"接口返回的 {len(items)} 条里没有这条作品（疑似图文/图集类内容），转浏览器模式"
+                f"接口返回的 {len(items)} 条里没有这条作品"
+                f"（图文/图集类内容，或该视频公开状态取不到），转浏览器模式"
             )
 
         video = target.get("video") or {}
