@@ -5,11 +5,14 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ytdlp.android.BuildConfig
@@ -36,6 +39,36 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicInteger
 import java.io.File
+import java.io.FileOutputStream
+
+/** 转 JPEG 时要带过去的 EXIF 字段：拍摄参数、机型、方向，以及宽高。 */
+private val EXIF_COPY_TAGS = listOf(
+    ExifInterface.TAG_MAKE,
+    ExifInterface.TAG_MODEL,
+    ExifInterface.TAG_LENS_MAKE,
+    ExifInterface.TAG_LENS_MODEL,
+    ExifInterface.TAG_DATETIME,
+    ExifInterface.TAG_DATETIME_ORIGINAL,
+    ExifInterface.TAG_EXPOSURE_TIME,
+    ExifInterface.TAG_F_NUMBER,
+    ExifInterface.TAG_ISO_SPEED_RATINGS,
+    ExifInterface.TAG_EXPOSURE_PROGRAM,
+    ExifInterface.TAG_EXPOSURE_MODE,
+    ExifInterface.TAG_FOCAL_LENGTH,
+    ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM,
+    ExifInterface.TAG_METERING_MODE,
+    ExifInterface.TAG_FLASH,
+    ExifInterface.TAG_WHITE_BALANCE,
+    ExifInterface.TAG_SCENE_CAPTURE_TYPE,
+    ExifInterface.TAG_COLOR_SPACE,
+    ExifInterface.TAG_SENSING_METHOD,
+    ExifInterface.TAG_SOFTWARE,
+    ExifInterface.TAG_ORIENTATION,
+    ExifInterface.TAG_IMAGE_WIDTH,
+    ExifInterface.TAG_IMAGE_LENGTH,
+    ExifInterface.TAG_PIXEL_X_DIMENSION,
+    ExifInterface.TAG_PIXEL_Y_DIMENSION,
+)
 
 /** 解析页的状态。各态互斥，用 sealed 比「一个 result + 一堆 bool」更难写错。 */
 sealed interface ParseUi {
@@ -488,24 +521,80 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun notifyMediaScanner(path: String) {
         if (path.isBlank()) return
-        runCatching {
-            val f = File(path)
-            // 图文类的产物是一个目录：要把里面的每一张都收录进去，
-            // scanFile 对目录本身不起作用。
-            val targets = if (f.isDirectory) {
-                (f.listFiles() ?: emptyArray()).filter { it.isFile }.map { it.absolutePath }
-            } else {
-                listOf(path)
-            }
-            if (targets.isEmpty()) return
-            // 扫完（每个文件回调一次）再登记实况图：登记要改 MediaStore 里的记录，
-            // 而记录是扫描之后才存在的，所以必须等它扫完。
-            val left = AtomicInteger(targets.size)
-            MediaScannerConnection.scanFile(ctx, targets.toTypedArray(), null) { _, _ ->
-                if (left.decrementAndGet() == 0 && f.isDirectory) markLivePhotos(f)
+        // 目录里可能有几十张图要转码，不能在主线程做
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val f = File(path)
+                val files = if (f.isDirectory) {
+                    (f.listFiles() ?: emptyArray()).filter { it.isFile }
+                } else {
+                    listOf(f)
+                }
+                // WebP 先转成真 JPEG 再交给相册，原因见 convertWebpToJpeg
+                val targets = files.map { file ->
+                    if (file.extension.equals("webp", true)) {
+                        runCatching { convertWebpToJpeg(file) }.getOrDefault(file).absolutePath
+                    } else {
+                        file.absolutePath
+                    }
+                }
+                if (targets.isEmpty()) return@runCatching
+                // 扫完（每个文件回调一次）再登记实况图：登记要改 MediaStore 里的记录，
+                // 而记录是扫描之后才存在的，所以必须等它扫完。
+                val left = AtomicInteger(targets.size)
+                MediaScannerConnection.scanFile(ctx, targets.toTypedArray(), null) { _, _ ->
+                    if (left.decrementAndGet() == 0 && f.isDirectory) markLivePhotos(f)
+                }
             }
         }
     }
+
+    /**
+     * 把 WebP 图片转成真正的 JPEG，并把能读到的 EXIF 原样带过去。
+     *
+     * 为什么要多这一步：小红书下发的图是 WebP。存成 `.jpg` 时相册按扩展名当
+     * JPEG 解析，分辨率显示 0×0；改存成 `.webp` 后分辨率正常了，但相册的参数
+     * 面板不解析 WebP 里的 EXIF，机型、ISO 等信息变成空白。只有真正的 JPEG
+     * 两头都对。
+     *
+     * 转换只发生在下载完成、通知相册收录之前：像素按 95 质量重新编码，宽高
+     * 以解码结果为准写回 EXIF；方向字段原样保留，相册照旧会自动转正。
+     * 转换失败就保留原 WebP，不影响下载结果。
+     */
+    private fun convertWebpToJpeg(src: File): File {
+        val dst = File(src.parentFile, src.nameWithoutExtension + ".jpg")
+        // 同名 JPEG 已存在说明这批名字被占用了，宁可不动，避免覆盖用户已有文件
+        if (dst.exists()) return src
+        val bmp = BitmapFactory.decodeFile(src.absolutePath) ?: return src
+        try {
+            FileOutputStream(dst).use { out ->
+                bmp.compress(Bitmap.CompressFormat.JPEG, 95, out)
+            }
+            val srcExif = ExifInterface(src.absolutePath)
+            val dstExif = ExifInterface(dst.absolutePath)
+            EXIF_COPY_TAGS.forEach { tag ->
+                srcExif.getAttribute(tag)?.let { dstExif.setAttribute(tag, it) }
+            }
+            // 宽高必须和实际像素一致 —— EXIF 里原来的值往往是平台压缩前的尺寸
+            dstExif.setAttribute(ExifInterface.TAG_IMAGE_WIDTH, bmp.width.toString())
+            dstExif.setAttribute(ExifInterface.TAG_IMAGE_LENGTH, bmp.height.toString())
+            dstExif.setAttribute(ExifInterface.TAG_PIXEL_X_DIMENSION, bmp.width.toString())
+            dstExif.setAttribute(ExifInterface.TAG_PIXEL_Y_DIMENSION, bmp.height.toString())
+            dstExif.saveAttributes()
+        } catch (_: Exception) {
+            dst.delete()
+            return src
+        } finally {
+            bmp.recycle()
+        }
+        if (dst.length() <= 0) {
+            dst.delete()
+            return src
+        }
+        src.delete()
+        return dst
+    }
+
 
     /**
      * 把目录里「同名的图片 + 视频」登记成系统相册的**动态照片（实况图）**。

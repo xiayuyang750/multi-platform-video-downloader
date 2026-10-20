@@ -162,4 +162,8 @@ dependencies {
     // "Module was compiled with an incompatible version of Kotlin"。
     // Coil2 是纯 Android 库，依赖 androidx.compose，与本项目同源。
     implementation("io.coil-kt:coil-compose:2.7.0")
+
+    // 读 WebP 里的 EXIF、再写进转码后的 JPEG。系统自带的 ExifInterface
+    // 对 WebP 的支持随版本而异，androidx 这个在 minSdk 26 上行为一致。
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 }

@@ -133,6 +133,9 @@ object PlatformColor {
     val xiaohongshu = Color(0xFFFF2442)
     // 微博品牌红（simple-icons 的 Sina Weibo 色值）
     val weibo = Color(0xFFE6162D)
+    // 微信绿与视频号橙：官方品牌色
+    val wechat = Color(0xFF07C160)
+    val channels = Color(0xFFFA9D3B)
     val other = Color(0xFF6B7280)
 
     /** 按平台名取色。名字来自 engine 的 detect_platform。 */
@@ -145,6 +148,8 @@ object PlatformColor {
         "Instagram" -> instagram
         "小红书" -> xiaohongshu
         "微博" -> weibo
+        "微信公众号" -> wechat
+        "微信视频号" -> channels
         else -> other
     }
 
@@ -158,6 +163,8 @@ object PlatformColor {
         "Instagram" -> "I"
         "小红书" -> "红"
         "微博" -> "微"
+        "微信公众号" -> "公"
+        "微信视频号" -> "视"
         else -> "其"
     }
 }

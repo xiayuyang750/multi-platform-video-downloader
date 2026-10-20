@@ -317,6 +317,50 @@ A/B 实测（同一 id，同一时段）：
 
 **关于「旧 App 显示无关视频」**：旧实现拿不到目标时退回了 `items[0]`（即推荐流第一条），属**伪成功**。当前项目严格比对 `aweme_id`、不匹配即报错，这个「防串台」逻辑是在正常工作的，问题从来不在比对，而在上游取数。
 
+#### 10.1 接口开始返回图文作品，导致「图文被当视频」（2026-10-21）
+
+**症状**：所有抖音图文 / 图集 / 实况图（含有声图集）突然都变成「视频」：
+解析成功但展示成视频、时长 0、点播放黑屏有 BGM 声音；下载也「成功」但相册里
+看不到新增内容（下到的是一段音频）。视频作品不受影响。
+
+**根因（已抓接口确认）**：feed 接口以前对图文类不返回目标作品，于是走 WebView
+兜底；现在它会返回，而且 `target.video` 只是一个 **BGM 占位对象**：
+
+```
+aweme_type=68, images=[...]
+video.duration = 0
+video.play_addr.url_list[0] = https://v5-ex-music.douyinstatic.com/...（音频）
+music.play_url            = 同一段 BGM
+```
+
+`_parse_douyin_via_api` 只看 `video`，于是把 BGM 当成视频下载/播放。
+
+**修复**（`android/app/src/main/python/ytdlp_engine.py`）：
+
+- 解析到 target 后**先看 `images`**：有图就走图集分支，不再看 `video`。
+- 图片取 `url_list`（模板 `tplv-dy-lqen-new`，无水印）；**不用
+  `download_url_list`**（模板带 `-water-`，会把抖音号印在图上）。
+- 实况图的动效地址：`images[i].video.play_addr.url_list[0]`，取不到再退
+  `video.bit_rate[0].play_addr.url_list[0]`。
+- `content_type = live`（任意一张有动效）/ `images`；`duration = None`。
+- **只有「每张图都带动效地址」的内容才走接口**。接口拿不到动效时，数据上无法区分
+  「普通图集」和「实况图合集」（实测 `mJsVdcGbhIo`：4 张图全是 `clip_type=2`、
+  `is_live_photo` 缺失、`video.bit_rate` 为空），此时一律抛错回退浏览器模式。
+  - 单张实况（`Y8R3J_nQ3KU` / `mhN75Y6ibZQ`）同理，接口只有静态图。
+  - 代价：普通图集也回到 WebView，解析比接口慢（与事件前一致）。
+  - 有声图集（`D_Mx3se-kmk` / `whaABhbpYLA`）接口里每张都带 `video`，继续走接口。
+
+**实测（2026-10-21，本机）**：
+
+| 链接 | 结果 |
+|---|---|
+| `v.douyin.com/5f1camprkkY` | ✅ 图文 · 1 张 |
+| `v.douyin.com/amt9Ae7lvGk` | ✅ 图文 · 4 张，下载出 4 张 jpg |
+| `v.douyin.com/whaABhbpYLA` | ✅ 实况图 · 11 张（10 张有动效），下载出 11 jpg + 10 mp4 |
+| `v.douyin.com/wwFflEuROGs` | ✅ 视频，1024p（不受影响） |
+
+**另记**：视频播放偶发「画面缩在左上角」，重解析后正常 —— 尚未复现，未改。
+
 ### 十一、遗留待办（截至 2026-10-20，本轮在此暂停）
 
 #### 11.1 本轮已完成并验证
@@ -377,7 +421,7 @@ A/B 实测（同一 id，同一时段）：
 
 #### 11.3 未开始
 
-- 快手、微信视频号 两个平台
+- 快手（微信视频号已做「预览卡片」，视频仍无法下载，见 11.5）
 - 安全演练报告（同类下载器滥用权限的研究文档 + 用户教育文案，只出文档，不给应用加外发功能）
 - v1.0.6 发布说明的最终定稿（上传前统一总结）
 - 首页/关于页文案里「境外站点需要开着 VPN」这句，与授权卡片的 VPN 说明存在重复表达，发布前可合并（低优先级）
@@ -385,6 +429,47 @@ A/B 实测（同一 id，同一时段）：
 #### 11.4 顺带产出（与主项目无依赖）
 
 - `docs/雷霆加速器-静态分析报告.md`：对第三方 APK 的静态安全分析（结论：未发现恶意代码）。
+
+#### 11.5 微信平台（2026-10-20）
+
+**链接形态**
+
+- 公众号文章 / 看一看分享 / 贴图：都在 `mp.weixin.qq.com/s/<id>` 下，但**两套模板**。
+- 视频号：`weixin.qq.com/sph/<id>` → 302 到 `channels.weixin.qq.com/finder-preview/...`。
+
+**公众号（纯 HTTP，无登录）**
+
+- 文章模板：正文容器 `id="js_content"`；标题 `msg_title`；作者 `nickname`；正文用 HTMLParser 转纯文本。
+- 贴图模板：没有 `js_content`，数据在 `picture_page_info_list` 里；标题取 `og:title`、作者取 `nick_name`。
+  - 判分支必须**先看 `js_content`**：文章页里也内嵌了 `picture_page_info_list` 的模板代码（实测 8 处），只按它判断会走错分支。
+- 图片：正文 `<img data-src>`，把路径末段尺寸号换成 `/0` 取更高质量（实测 1.03MB → 1.17MB）；
+  贴图优先用 `original_info.cdn_url`（「查看原图」，实测单张 8.47MB，且不需要 Referer）。
+- 视频：页面里 `mp_video_trans_info` 带 4 档（实测 1920/1080/854/480），直链在 `mpvideo.qpic.cn`。
+  - 该直链**短时、近似一次性**：同一地址间隔 1.5 秒重复请求会交替 200/403。
+  - 下载时带 `Referer: https://mp.weixin.qq.com/`，并**跳过 Range 探测**（只发一次整文件请求）。
+  - CDN 同时校验 **User-Agent**：ExoPlayer 默认 UA / 空 UA / 安卓 Chrome UA 都会 403，
+    微信 UA 或桌面 Chrome UA 才是 200。安卓播放器必须显式 `setUserAgent(微信 UA)`，
+    否则表现是「预览黑屏、时长 0:00」。
+  - 直链的 `dis_t` 等于页面加载时刻，过一阵就过期；下载前要重新抓页面换新地址
+    （`_refresh_wechat_rec`），否则会出现「有时下成功、有时 403」。
+- 正文展示：`Video.description` 字段 + `history.description` 列；解析页默认折 4 行，可展开/收起、复制正文。
+
+**视频号（只能拿元数据）**
+
+- 预览页是 JS 壳，数据本应走 `WeixinJSBridge`（仅微信客户端注入）。
+- 但页面会调公开接口（无需登录）：
+
+  ```
+  POST https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info
+  {"baseReq":{"generalToken":""},"shortUri":"<id>"}
+  ```
+
+  返回标题、作者、封面、发布时间、点赞数；**没有视频地址**（`h264VideoInfo`/`videoUrl` 等被服务端按登录态掐掉）。
+- 桌面 / 安卓 UA 在浏览器里都只显示「前往微信观看」；微信 UA 则直接走 bridge、不发 HTTP 请求。
+- `channels.weixin.qq.com/web/pages/feed` 是微信 PC 客户端内置页面，普通浏览器打开提示「微信版本较低」。
+- 结论：`content_type = "preview"`，界面展示卡片并明确「不支持直接下载」，不给下载按钮。
+  - 注意：用户在真机上确认**微信内通常也没有「保存视频」入口**，所以提示文案里不要写「请在微信里保存」，那是一个做不到的指引。
+
 
 
 

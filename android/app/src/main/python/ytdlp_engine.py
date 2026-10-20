@@ -21,6 +21,7 @@ tkinter 文件夹选择框、explorer 打开目录。
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -29,8 +30,11 @@ import sqlite3
 import subprocess
 import threading
 import time
+import urllib.parse
 import urllib.request
+import uuid
 import zlib
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -47,8 +51,9 @@ CONFIG_FILE = BASE_DIR / "defaults.json"
 # 交给 yt-dlp 只会走通用提取器并报 Unsupported URL —— 界面上的表现就是
 # 「下载失败：不支持这种链接」（用户实测反馈）。走这条路还能顺带拿到 Range 分块并行。
 # 与 Windows 端 engine.DIRECT_URL_HOSTS 对应，改一处要同步另一处。
+# 例外：mpvideo.qpic.cn（微信公众号文章里的视频）暂只在安卓端支持。
 DIRECT_URL_HOSTS = ("douyinvod.com", "365yg.com", "amemv.com", "video.twimg.com",
-                    "xhscdn.com", "rednotecdn.com")
+                    "xhscdn.com", "rednotecdn.com", "mpvideo.qpic.cn")
 
 # 直链分块下载的读取粒度。太小会让线程调度开销盖过收益，1 MiB 是实测的折中。
 _DIRECT_READ = 1 << 20
@@ -70,6 +75,12 @@ PLATFORM_RULES = [
     # xhslink.cn.attacker.com 这种也会被判成小红书。上面几条没这道检查是
     # 既有问题（见 docs/1.0.4-测试与安全演练报告.md 的 A1），不在此处一并改。
     ("小红书", r"(^|//)([a-z0-9-]+\.)*(xiaohongshu\.com|xhslink\.(?:cn|com))(?![a-z0-9.-])"),
+    # 视频号：分享短链是 weixin.qq.com/sph/<id>，跳转后落在 channels.weixin.qq.com。
+    # 视频本身拿不到（见 _parse_wechat_channels 的说明），这里只负责识别出来，
+    # 好给用户一句明确提示，而不是「不支持这种链接」。
+    ("微信视频号", r"(^|//)([a-z0-9-]+\.)*(channels\.weixin\.qq\.com|weixin\.qq\.com/sph/)"),
+    # 微信公众号：文章与「贴图/图文」都是 mp.weixin.qq.com 下的公开网页。
+    ("微信公众号", r"(^|//)([a-z0-9-]+\.)*mp\.weixin\.qq\.com(?![a-z0-9.-])"),
     # 微博。实测（用 yt-dlp 自带的三个官方样例）：weibo.com/tv/show/<id>、
     # m.weibo.cn/status/<id>、weibo.com/<uid>/<mid> 三种形态**都能开箱解析**
     # （1080p / 720p 档位齐全，不需要登录态）。
@@ -179,6 +190,38 @@ _BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+
+
+def _douyin_image_url(img: dict) -> str:
+    """图文/图集里挑一张图：优先 `url_list`（无水印），再优先 jpeg。
+
+    `download_url_list` 的模板带 `-water-`，会把作者抖音号印在图上（Kotlin 侧
+    的 WebView 解析也遵循同一条规则），所以不用它。
+    """
+    urls = img.get("url_list") or []
+    fallback = ""
+    for u in urls:
+        if not u:
+            continue
+        if not fallback:
+            fallback = u
+        low = u.lower()
+        if ".jpeg" in low or ".jpg" in low:
+            return u
+    return fallback
+
+
+def _douyin_live_url(img: dict) -> str:
+    """实况图里「动的那一段」视频地址；普通图片返回空串。"""
+    video = img.get("video") or {}
+    play = ((video.get("play_addr") or {}).get("url_list") or [])
+    if play:
+        return play[0]
+    for br in (video.get("bit_rate") or []):
+        u = (((br or {}).get("play_addr") or {}).get("url_list") or [""])[0]
+        if u:
+            return u
+    return ""
 
 
 def douyin_video_id(url: str) -> str:
@@ -778,6 +821,9 @@ class Store:
             self.conn.execute("ALTER TABLE history ADD COLUMN source_md5 TEXT")
         if "file_md5" not in cols:
             self.conn.execute("ALTER TABLE history ADD COLUMN file_md5 TEXT")
+        # 正文：微信公众号文章 / 贴图的整段文字。只存文本，不含 HTML。
+        if "description" not in cols:
+            self.conn.execute("ALTER TABLE history ADD COLUMN description TEXT")
 
     def upsert(self, rec: dict) -> None:
         # 图文类没有 resolved_url / download_url / play_kind，这里补默认值，
@@ -785,6 +831,7 @@ class Store:
         row = {
             "resolved_url": "", "download_url": "", "play_kind": "none",
             "content_type": "video", "media_json": "", "source_md5": "",
+            "description": "",
             **rec,
         }
         with self._write_lock:
@@ -793,11 +840,11 @@ class Store:
                 INSERT INTO history (id, platform, title, uploader, uploader_id, duration,
                                      thumbnail, source_url, resolved_url, download_url,
                                      resolved_at, play_kind, content_type, media_json,
-                                     source_md5)
+                                     source_md5, description)
                 VALUES (:id, :platform, :title, :uploader, :uploader_id, :duration,
                         :thumbnail, :source_url, :resolved_url, :download_url,
                         :resolved_at, :play_kind, :content_type, :media_json,
-                        :source_md5)
+                        :source_md5, :description)
                 ON CONFLICT(id) DO UPDATE SET
                     platform     = excluded.platform,
                     title        = excluded.title,
@@ -812,7 +859,8 @@ class Store:
                     play_kind    = excluded.play_kind,
                     content_type = excluded.content_type,
                     media_json   = excluded.media_json,
-                    source_md5   = excluded.source_md5
+                    source_md5   = excluded.source_md5,
+                    description  = excluded.description
                 """,
                 row,
             )
@@ -849,6 +897,27 @@ class Store:
             self.conn.execute(
                 "UPDATE history SET local_path = ? WHERE source_url = ?",
                 (path, source_url),
+            )
+            self.conn.commit()
+
+    def set_media_json(self, vid: str, media_json: str) -> None:
+        """刷新图文/图集的媒体地址（公众号视频直链会过期，下载前换新的）。"""
+        if not vid:
+            return
+        with self._write_lock:
+            self.conn.execute(
+                "UPDATE history SET media_json = ? WHERE id = ?", (media_json, vid)
+            )
+            self.conn.commit()
+
+    def set_video_url(self, vid: str, url: str) -> None:
+        """刷新单视频的直链（同上，公众号视频地址是页面现签发的）。"""
+        if not vid or not url:
+            return
+        with self._write_lock:
+            self.conn.execute(
+                "UPDATE history SET resolved_url = ?, download_url = ? WHERE id = ?",
+                (url, url, vid),
             )
             self.conn.commit()
 
@@ -908,6 +977,374 @@ def _ext_from_url(url: str, default: str) -> str:
     """
     m = re.search(r"\.(jpg|jpeg|png|webp|gif|mp4|mov|webm)(?:\?|$)", (url or "").lower())
     return f".{m.group(1)}" if m else default
+
+
+def _sniff_image_ext(path: str) -> str | None:
+    """按文件头认图片真实格式，返回带点的扩展名；认不出来返回 None。
+
+    小红书的图片地址末尾常见 `!nd_dft_wlteh_webp_3` 这类处理参数，CDN 实际
+    下发的是 WebP，而地址里没有扩展名，落盘时会退成 `.jpg`。文件名和内容
+    对不上时，相册按扩展名当 JPEG 解析失败，分辨率就显示成 0×0 —— 实测同一
+    张图改名为 `.webp` 后，MediaStore 能正确记成 image/webp + 1080×1440。
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError:
+        return None
+    if head[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand in (b"heic", b"heix", b"mif1", b"heif", b"hevc"):
+            return ".heic"
+        if brand in (b"avif", b"avis"):
+            return ".avif"
+    return None
+
+
+# ==================== 微信公众号 / 视频号 ====================
+
+# 微信内置浏览器的 UA。普通浏览器 UA 也能打开文章，但用它更接近分享场景
+# （部分媒体地址会按 UA 下发）。
+WECHAT_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.49 NetType/WIFI Language/zh_CN"
+)
+WECHAT_REFERER = "https://mp.weixin.qq.com/"
+WECHAT_CHANNELS_API = "https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info"
+
+
+class _WxTextParser(HTMLParser):
+    """把公众号正文 HTML 转成纯文本：块级标签换行，脚本/样式整段丢掉。"""
+
+    _BLOCK = {
+        "p", "div", "section", "br", "li", "h1", "h2", "h3", "h4", "blockquote",
+        "tr", "table", "figure", "figcaption",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._out: list[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self._skip += 1
+        if tag in self._BLOCK:
+            self._out.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style") and self._skip:
+            self._skip -= 1
+        if tag in self._BLOCK:
+            self._out.append("\n")
+
+    def handle_data(self, data):
+        if not self._skip:
+            self._out.append(data)
+
+    def text(self) -> str:
+        raw = "".join(self._out)
+        lines = [re.sub(r"[ \t\u3000]+", " ", ln).strip() for ln in raw.splitlines()]
+        return "\n".join(ln for ln in lines if ln).strip()
+
+
+def _wx_unescape(s: str) -> str:
+    """还原微信页面里的多层转义：`\\x26amp;` / `\\x0a` / HTML 实体。"""
+    s = (s or "").replace("\\x26amp;", "&").replace("\\x26", "&")
+    s = s.replace("\\x0a", "\n").replace("\\x3d", "=").replace("\\x3f", "?")
+    return html.unescape(s)
+
+
+def _wx_first(page: str, pattern: str) -> str:
+    m = re.search(pattern, page)
+    return _wx_unescape(m.group(1)).strip() if m else ""
+
+
+def _wx_js_var(page: str, name: str) -> str:
+    """取页面里 `name = '...'` / `name = "..."` 这种 JS 变量。"""
+    for q in ("'", '"'):
+        m = re.search(rf"\b{name}\s*=\s*{q}([^{q}]*){q}", page)
+        if m:
+            v = _wx_unescape(m.group(1)).strip()
+            v = re.sub(r"\.html\((?:false|true)\)$", "", v).strip()
+            if v:
+                return v
+    return ""
+
+
+def _wx_meta(page: str, prop: str) -> str:
+    pat = re.escape(prop)
+    m = re.search(rf'<meta[^>]+(?:property|name)="{pat}"[^>]+content="([^"]*)"', page, re.I)
+    if not m:
+        m = re.search(rf'<meta[^>]+content="([^"]*)"[^>]+(?:property|name)="{pat}"', page, re.I)
+    return _wx_unescape(m.group(1)).strip() if m else ""
+
+
+def _wx_fetch(url: str) -> str:
+    req = urllib.request.Request(url, headers={
+        "User-Agent": WECHAT_UA,
+        "Referer": WECHAT_REFERER,
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    })
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        raw = resp.read()
+        charset = "utf-8"
+        m = re.search(r"charset=([\w-]+)", resp.headers.get("Content-Type") or "", re.I)
+        if m:
+            charset = m.group(1)
+    try:
+        return raw.decode(charset, "replace")
+    except LookupError:
+        return raw.decode("utf-8", "replace")
+
+
+def _wx_block(s: str, start: int, open_ch: str, close_ch: str) -> str:
+    """从 `start` 处的开括号开始，返回配对的整段内容（跳过字符串里的括号）。"""
+    depth, i, quote = 0, start, ""
+    while i < len(s):
+        ch = s[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return s[start + 1:i]
+        i += 1
+    return s[start + 1:]
+
+
+def _wx_div_inner(page: str) -> str:
+    """取出 `<div id="js_content">` 里的正文 HTML。"""
+    i = page.find('id="js_content"')
+    if i < 0:
+        return ""
+    start = page.find(">", i)
+    if start < 0:
+        return ""
+    rest = page[start + 1:]
+    depth = 1
+    for m in re.finditer(r"<(/?)div\b[^>]*>", rest, re.I):
+        depth += -1 if m.group(1) else 1
+        if depth == 0:
+            return rest[:m.start()]
+    return rest[:300000]
+
+
+def _wx_html_text(fragment: str) -> str:
+    p = _WxTextParser()
+    try:
+        p.feed(fragment)
+        p.close()
+        return p.text()
+    except Exception:  # noqa: BLE001
+        return re.sub(r"<[^>]+>", "", fragment or "").strip()
+
+
+def _wx_image_url(url: str) -> str:
+    """微信图片地址统一取「原图」：路径末段的尺寸号换成 0。
+
+    实测同一张图 `/640` 是 1.03MB、`/0` 是 1.17MB，像素尺寸一致但编码质量更高；
+    贴图页还会直接给 `original_info`（「查看原图」）地址，那个优先。
+    """
+    u = (url or "").split("#", 1)[0]
+    m = re.match(r"^(.*/)\d+(\?.*)?$", u)
+    if m and "mmbiz.qpic.cn" in u:
+        u = m.group(1) + "0" + (m.group(2) or "")
+    return u
+
+
+def _wx_images(fragment: str) -> list[str]:
+    out: list[str] = []
+    seen: set = set()
+    for m in re.finditer(r"<img\b[^>]*>", fragment or "", re.I):
+        tag = m.group(0)
+        src = ""
+        for attr in ("data-src", "src"):
+            mm = re.search(attr + r'\s*=\s*["\']([^"\']+)["\']', tag, re.I)
+            if mm:
+                src = _wx_unescape(mm.group(1))
+                if src:
+                    break
+        if not src.startswith("http"):
+            continue
+        src = _wx_image_url(src)
+        if src not in seen:
+            seen.add(src)
+            out.append(src)
+    return out
+
+
+def _wx_video_tiers(page: str) -> list[dict]:
+    """从文章页的 `mp_video_trans_info` 里取视频档位（按清晰度从高到低）。"""
+    tiers: list[dict] = []
+    seen: set = set()
+    pat = (r"format_id:\s*'(\d+)'.*?width:\s*'(\d+)'.*?height:\s*'(\d+)'"
+           r".*?filesize:\s*'(\d+)'.*?url:\s*'([^']+)'")
+    for m in re.finditer(pat, page, re.S):
+        _fid, w, h, size, raw = m.groups()
+        url = _wx_unescape(raw)
+        if "mpvideo.qpic.cn" not in url or ".mp4?" not in url or url in seen:
+            continue
+        seen.add(url)
+        w, h, size = int(w), int(h), int(size)
+        tiers.append({
+            "url": url,
+            "width": w,
+            "height": h,
+            "filesize": size,
+            "label": f"{h}p · {size / 1024 / 1024:.1f} MB" if size else f"{h}p",
+        })
+    tiers.sort(key=lambda t: (t["height"], t["filesize"]), reverse=True)
+    return tiers
+
+
+def _wx_picture_items(page: str) -> list[dict]:
+    """贴图 / 图文模板：解析 `picture_page_info_list`，优先取「查看原图」地址。"""
+    i = page.find("picture_page_info_list")
+    if i < 0:
+        return []
+    j = page.find("[", i)
+    if j < 0:
+        return []
+    block = _wx_block(page, j, "[", "]")
+    out: list[dict] = []
+    pos = 0
+    while pos < len(block):
+        k = block.find("{", pos)
+        if k < 0:
+            break
+        ent = _wx_block(block, k, "{", "}")
+        pos = k + len(ent) + 2
+
+        cdn = _wx_first(ent, r"cdn_url:\s*'([^']+)'")
+        mo = re.search(r"original_info:\s*\{[^{}]*?cdn_url:\s*'([^']*)'", ent, re.S)
+        orig = _wx_unescape(mo.group(1)) if mo else ""
+        url = orig if orig.startswith("http") else cdn
+        if not url.startswith("http"):
+            continue
+        w = _wx_first(ent, r"width:\s*'(\d+)'")
+        h = _wx_first(ent, r"height:\s*'(\d+)'")
+        out.append({
+            "url": url,
+            "width": int(w) if w.isdigit() else 0,
+            "height": int(h) if h.isdigit() else 0,
+            "kind": "image",
+        })
+    return out
+
+
+def _wx_article_id(url: str) -> str:
+    m = re.search(r"/s/([0-9A-Za-z_-]+)", url)
+    if m:
+        return "wx_" + m.group(1)
+    m = re.search(r"[?&]sn=([0-9a-f]+)", url, re.I)
+    if m:
+        return "wx_" + m.group(1)
+    return "wx_" + hashlib.md5(url.encode("utf-8")).hexdigest()[:16]
+
+
+def _wx_sph_id(url: str) -> str:
+    m = re.search(r"/sph/([0-9A-Za-z_-]+)", url)
+    if m:
+        return m.group(1)
+    m = re.search(r"[?&]id=([0-9A-Za-z_-]+)", url)
+    return m.group(1) if m else ""
+
+
+def _wx_article_record(url: str, page: str) -> tuple:
+    inner = _wx_div_inner(page)
+    title = _wx_js_var(page, "msg_title") or _wx_meta(page, "og:title") or "公众号文章"
+    author = _wx_js_var(page, "nickname") or _wx_first(page, r"nick_name:\s*'([^']*)'")
+    body = _wx_html_text(inner)
+    images = _wx_images(inner)
+    tiers = _wx_video_tiers(page)
+
+    media = [{"url": u, "kind": "image"} for u in images]
+    # 正文里带视频时，图片和视频混排：把最高清的那一档放进媒体列表，
+    # 这样「下载全部」能一次把图和视频都存下来（视频项在列表里按 kind 区分）。
+    if tiers:
+        best = tiers[0]
+        media.append({"url": best["url"], "width": best["width"],
+                      "height": best["height"], "kind": "video"})
+
+    if not media and not body:
+        raise ValueError("这篇公众号里没有取到图片、视频或正文（可能已被删除或需要验证）。")
+
+    # 纯文字文章也有价值：正文能读、能复制，只是没有可下载的媒体
+    ctype = "images" if images else ("video" if tiers else "text")
+    rec = {
+        "id": _wx_article_id(url),
+        "platform": "微信公众号",
+        "title": title,
+        "uploader": author,
+        "uploader_id": "",
+        "duration": None,
+        "thumbnail": images[0] if images else "",
+        "source_url": url,
+        "resolved_url": (tiers[0]["url"] if (tiers and not images) else ""),
+        "download_url": (tiers[0]["url"] if (tiers and not images) else ""),
+        "resolved_at": int(time.time()),
+        "play_kind": "progressive" if (tiers and not images) else "none",
+        "content_type": ctype,
+        "media_json": json.dumps(media, ensure_ascii=False) if media else "",
+        "description": body,
+        "source_md5": "",
+    }
+
+    if images:
+        video_count = sum(1 for m in media if m.get("kind") == "video")
+        quality = (f"图文 · 共 {len(images)} 张"
+                   + (f" + {video_count} 个视频" if video_count else ""))
+    elif tiers:
+        quality = tiers[0]["label"]
+    else:
+        quality = "纯文字 · 没有可下载的媒体"
+    return rec, quality, tiers
+
+
+def _wx_picture_record(url: str, page: str) -> tuple:
+    title = _wx_meta(page, "og:title") or "微信图文"
+    author = _wx_first(page, r"nick_name:\s*'([^']*)'")
+    body = _wx_html_text(_wx_meta(page, "og:description"))
+    media = _wx_picture_items(page)
+    if not media:
+        raise ValueError("这条图文里没有取到图片（可能已被删除或需要验证）。")
+
+    rec = {
+        "id": _wx_article_id(url),
+        "platform": "微信公众号",
+        "title": title,
+        "uploader": author,
+        "uploader_id": "",
+        "duration": None,
+        "thumbnail": media[0]["url"],
+        "source_url": url,
+        "resolved_url": "",
+        "download_url": "",
+        "resolved_at": int(time.time()),
+        "play_kind": "none",
+        "content_type": "images",
+        "media_json": json.dumps(media, ensure_ascii=False),
+        "description": body,
+        "source_md5": "",
+    }
+    return rec, f"图文 · 共 {len(media)} 张", []
 
 
 def _writable(path: str) -> bool:
@@ -1225,6 +1662,16 @@ class Engine:
                          "之后不用再登录）。",
             }
 
+        # 微信公众号（文章 / 贴图 / 看一看分享）是公开网页，纯 HTTP 就能读，
+        # 不需要浏览器、不需要登录。
+        if platform == "微信公众号":
+            return self._parse_wechat(url)
+
+        # 视频号：只有分享预览接口，拿得到标题/作者/封面，拿不到视频流
+        # （原因见 _parse_wechat_channels）。识别出来是为了给一句明确提示。
+        if platform == "微信视频号":
+            return self._parse_wechat_channels(url)
+
         # 微博头条文章是另一种页面（`weibo.com/ttarticle/...`，文章 id 还在 `#`
         # 后面）—— yt-dlp 没有任何提取器认它，直接交给浏览器模式。
         if platform == "微博" and ("ttarticle" in url or "card.weibo.com/article" in url):
@@ -1419,6 +1866,61 @@ class Engine:
                 f"接口返回的 {len(items)} 条里没有这条作品"
                 f"（图文/图集类内容，或该视频公开状态取不到），转浏览器模式"
             )
+
+        # 图文 / 图集 / 实况图：接口现在会把这些也带回来（2026-10 起），
+        # 但它们的 `video` 只是一个 BGM 占位（duration=0，地址是音频），
+        # 按视频处理就会「黑屏、有声、0 秒、下载到一段音频」。所以先看 images。
+        images = target.get("images") or []
+        if images:
+            media: list[dict] = []
+            for img in images:
+                src = _douyin_image_url(img)
+                if not src:
+                    continue
+                media.append({
+                    "url": src,
+                    "width": int(img.get("width") or 0),
+                    "height": int(img.get("height") or 0),
+                    "live": _douyin_live_url(img),
+                })
+            if media:
+                # 接口只对**部分**实况内容给出每张图的动效地址（images[i].video）。
+                # 拿不到动效时，接口数据无法区分「普通图集」和「实况图合集」——
+                # 两者都没有 video、没有 is_live_photo 标记（实测合集
+                # mJsVdcGbhIo：4 张图全是 clip_type=2、is_live_photo 缺失）。
+                # 只有页面 SSR 数据里才有 playAddr，所以这种情况一律回退浏览器模式。
+                if not any(m["live"] for m in media):
+                    raise RuntimeError("接口返回的图片没有动效信息，转浏览器模式确认是否实况图")
+                ctype = "live"
+                author = target.get("author") or {}
+                rec = {
+                    "id": str(target.get("aweme_id") or vid),
+                    "platform": "抖音",
+                    "title": target.get("desc") or "",
+                    "uploader": author.get("nickname") or "",
+                    "uploader_id": author.get("unique_id") or author.get("short_id") or "",
+                    "duration": None,
+                    # 图文类封面就是第一张图
+                    "thumbnail": media[0]["url"],
+                    "source_url": url,
+                    "resolved_url": "",
+                    "download_url": "",
+                    "resolved_at": int(time.time()),
+                    "play_kind": "none",
+                    "content_type": ctype,
+                    "media_json": json.dumps(media, ensure_ascii=False),
+                    "tiers": [],
+                    "source_md5": "",
+                }
+                self.store.upsert(rec)
+                quality = (f"实况图 · 共 {len(media)} 张" if ctype == "live"
+                           else f"图文 · 共 {len(media)} 张")
+                return {
+                    "ok": True,
+                    **self._with_local_path(rec),
+                    "quality": quality,
+                    "filesize": "",
+                }
 
         video = target.get("video") or {}
         play_url, download_url = douyin_pick_tiers(video)
@@ -1623,6 +2125,118 @@ class Engine:
             "via": "browser",
         }
 
+    def _parse_wechat(self, url: str) -> dict:
+        """微信公众号：文章模板与「贴图/图文」模板两条分支。
+
+        都是公开网页，纯 HTTP 读取，不需要 Cookie。正文会完整带回去（界面做
+        折叠展示 + 复制），图片优先取「原图」，文章里的视频取最高清的一档。
+        """
+        try:
+            page = _wx_fetch(url)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"打开微信页面失败：{type(exc).__name__}: {exc}"}
+
+        if not page or len(page) < 500:
+            return {"ok": False, "error": "微信页面没有返回有效内容，可能已被删除或需要验证。"}
+        if "环境异常" in page:
+            return {"ok": False, "error": "微信要求人机验证，暂时取不到这篇内容，请稍后再试。"}
+
+        try:
+            # 注意顺序：文章页里也内嵌了 `picture_page_info_list` 的模板代码，
+            # 所以必须先看有没有 `js_content`（文章正文容器），再判贴图模板。
+            if 'id="js_content"' in page:
+                rec, quality, _tiers = _wx_article_record(url, page)
+            elif "picture_page_info_list" in page:
+                rec, quality, _tiers = _wx_picture_record(url, page)
+            else:
+                return {"ok": False, "error": "没认出这个微信页面的类型（既不是文章也不是图文）。"}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        self.store.upsert(rec)
+        return {
+            "ok": True,
+            **self._with_local_path(rec),
+            "quality": quality,
+            "filesize": "",
+        }
+
+    def _parse_wechat_channels(self, url: str) -> dict:
+        """视频号：调分享预览接口取元数据，**不下载视频**。
+
+        实测结论（2026-10）：
+          - `weixin.qq.com/sph/<id>` 会 302 到 `channels.weixin.qq.com/finder-preview/`，
+            页面本身只是 JS 壳，数据全由微信客户端注入的 `WeixinJSBridge` 提供；
+          - 浏览器里（桌面 / 安卓 UA 都试过）页面只显示「前往微信观看」；
+          - 但预览页会发一个公开的 POST 接口 `get_feed_info`，无需登录即可拿到
+            标题、作者、封面、发布时间、点赞数；**返回里没有视频地址**
+            （`h264VideoInfo` / `videoUrl` 等字段被服务端按登录态掐掉了）。
+
+        所以这里返回一条 `content_type=preview` 的记录：界面能展示卡片与作者信息，
+        但不给下载按钮 —— 视频只能在微信里「保存视频」。
+        """
+        sid = _wx_sph_id(url)
+        if not sid:
+            return {"ok": False, "error": "没能从这条链接里识别出微信视频号作品编号。"}
+
+        page_url = f"https://channels.weixin.qq.com/finder-preview/pages/sph?id={sid}"
+        qs = urllib.parse.urlencode({
+            "_rid": f"{uuid.uuid4().hex[:8]}-{uuid.uuid4().hex[:8]}",
+            "_pageUrl": page_url,
+        })
+        body = json.dumps({"baseReq": {"generalToken": ""}, "shortUri": sid}).encode("utf-8")
+        req = urllib.request.Request(
+            WECHAT_CHANNELS_API + "?" + qs, data=body, method="POST",
+            headers={
+                "User-Agent": _BROWSER_UA,
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "Referer": page_url,
+                "Origin": "https://channels.weixin.qq.com",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"读取微信视频号信息失败：{type(exc).__name__}: {exc}"}
+
+        if data.get("errCode") not in (0, None):
+            return {"ok": False, "error": f"微信视频号接口返回错误：{data.get('errMsg') or data.get('errCode')}"}
+
+        info = data.get("data") or {}
+        feed = info.get("feedInfo") or {}
+        author = (info.get("authorInfo") or {}).get("nickname") or ""
+        desc = (feed.get("description") or "").strip()
+        title = desc.splitlines()[0].strip() if desc else "微信视频号作品"
+
+        rec = {
+            "id": "sph_" + sid,
+            "platform": "微信视频号",
+            "title": title,
+            "uploader": author,
+            "uploader_id": "",
+            "duration": None,
+            "thumbnail": feed.get("coverUrl") or "",
+            "source_url": url,
+            "resolved_url": "",
+            "download_url": "",
+            "resolved_at": int(time.time()),
+            "play_kind": "none",
+            # preview：界面据此展示卡片、隐藏下载按钮
+            "content_type": "preview",
+            "media_json": "",
+            "description": desc,
+            "source_md5": "",
+        }
+        self.store.upsert(rec)
+        return {
+            "ok": True,
+            **self._with_local_path(rec),
+            "quality": "微信视频号 · 不支持直接下载",
+            "filesize": "",
+        }
+
     def _parse_x(self, url: str, ytdlp_err: str = "") -> dict:
         """X 的第三方链路：调 FxTwitter 拿直链。
 
@@ -1706,7 +2320,7 @@ class Engine:
         # （要么被风控、要么只有图文），但**直链已经由浏览器取数入库**。
         # 漏掉它的后果实测过：下载会拿原始短链去喂 yt-dlp，报 Unsupported URL，
         # 界面上的表现就是「下载失败：不支持这种链接」。
-        if detect_platform(url) not in ("抖音", "X", "小红书"):
+        if detect_platform(url) not in ("抖音", "X", "小红书", "微信公众号"):
             return url
         for rec in self.store.all():
             if rec.get("source_url") == url:
@@ -1878,17 +2492,26 @@ class Engine:
         if "douyinvod.com" in target:
             # 抖音直链来自浏览器监听，其 CDN 会校验 Referer，不带会被拒
             headers["Referer"] = "https://www.douyin.com/"
+        elif "mpvideo.qpic.cn" in target:
+            # 公众号视频：带不带 Referer 决定 200 还是 403（实测）
+            headers["Referer"] = WECHAT_REFERER
         eng = self.defaults.get("engine") or {}
         timeout = int(eng.get("socket_timeout") or 20)
         workers = max(1, int(eng.get("direct_threads") or 6))
 
         try:
-            total, ranged = self._probe_range(target, headers, timeout)
-            if ranged and total > 0 and workers > 1:
-                self._ranged_get(target, path, total, headers, timeout, workers)
-            else:
-                print(f"[engine] 直链不支持分块（总长度 {total}），改用单连接")
+            # 公众号视频的鉴权是「短时一次性」的：连续两次请求里必有一次 403
+            # （实测同一地址间隔 1.5 秒重复请求会交替失败）。所以不做 Range
+            # 探测，直接一次整文件拉，少一次请求就少一次踩雷。
+            if "mpvideo.qpic.cn" in target:
                 self._stream_get(target, path, headers, timeout)
+            else:
+                total, ranged = self._probe_range(target, headers, timeout)
+                if ranged and total > 0 and workers > 1:
+                    self._ranged_get(target, path, total, headers, timeout, workers)
+                else:
+                    print(f"[engine] 直链不支持分块（总长度 {total}），改用单连接")
+                    self._stream_get(target, path, headers, timeout)
         except Exception:
             # 失败不留半截文件：那东西留在磁盘上，用户下次下载还会撞进重名逻辑
             try:
@@ -2023,6 +2646,55 @@ class Engine:
             self.dl_state.update(type="processing", active=True,
                                  percent=100.0, message="正在合并音视频…")
 
+    def _refresh_wechat_rec(self, rec: dict) -> dict:
+        """下载前刷新公众号视频地址。
+
+        微信视频直链由文章页**现签发**：`dis_t` 就等于页面加载那一刻，存进库里
+        过一阵就过期。拿旧地址去下载会 403（界面表现：有时成功、有时失败）。
+        这里重新抓一次页面，把媒体列表 / 直链换成新地址并写回历史库。
+        """
+        media = json.loads(rec.get("media_json") or "[]")
+        has_video = (
+            any("mpvideo.qpic.cn" in (it.get("url") or "") for it in media)
+            or "mpvideo.qpic.cn" in (rec.get("download_url") or "")
+        )
+        if not has_video:
+            return rec
+        try:
+            page = _wx_fetch(rec.get("source_url") or "")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[wechat] 刷新视频地址失败，继续用旧地址：{exc}")
+            return rec
+        tiers = _wx_video_tiers(page)
+        if not tiers:
+            return rec
+
+        best = tiers[0]
+        new_media: list[dict] = []
+        replaced = False
+        for it in media:
+            if not replaced and "mpvideo.qpic.cn" in (it.get("url") or ""):
+                new_media.append({
+                    **it,
+                    "url": best["url"],
+                    "width": best["width"],
+                    "height": best["height"],
+                })
+                replaced = True
+            else:
+                new_media.append(it)
+
+        rec = dict(rec)
+        if new_media:
+            rec["media_json"] = json.dumps(new_media, ensure_ascii=False)
+            self.store.set_media_json(rec.get("id") or "", rec["media_json"])
+        if "mpvideo.qpic.cn" in (rec.get("download_url") or "") \
+                or rec.get("content_type") == "video":
+            rec["resolved_url"] = best["url"]
+            rec["download_url"] = best["url"]
+            self.store.set_video_url(rec.get("id") or "", best["url"])
+        return rec
+
     def _download_media_list(self, url: str, rec: dict, only_index: int = 0) -> None:
         """图文 / 图集 / 实况图：逐张存进「作者名」的子目录。
 
@@ -2083,15 +2755,29 @@ class Engine:
                 continue
             kind = (item or {}).get("kind") or "image"
             ext = _ext_from_url(src, ".mp4" if kind == "video" else ".jpg")
+            dst = os.path.join(folder, f"{stem}{i:02d}{tag}{ext}")
+            # 公众号文章里的视频项走 mpvideo.qpic.cn，必须带微信自己的 Referer；
+            # 图片（mmbiz.qpic.cn）反过来不带也没事，保持平台默认头即可。
+            item_headers = headers
+            if "mpvideo.qpic.cn" in src:
+                item_headers = {**headers, "Referer": WECHAT_REFERER}
             try:
-                req = urllib.request.Request(src, headers=headers)
+                req = urllib.request.Request(src, headers=item_headers)
                 with urllib.request.urlopen(req, timeout=30) as resp:
-                    with open(os.path.join(folder, f"{stem}{i:02d}{tag}{ext}"), "wb") as f:
+                    with open(dst, "wb") as f:
                         shutil.copyfileobj(resp, f)
             except Exception as exc:  # noqa: BLE001
                 # 单张失败不该让整条任务断掉：能下几张是几张，最后如实报数
                 print(f"[douyin] 第 {i} 张下载失败：{exc}")
                 continue
+
+            # 地址里常常没有扩展名，落盘先按默认的 .jpg 猜。猜错了相册会把
+            # 分辨率显示成 0×0，所以下完按文件头改回真实扩展名（内容不动）。
+            if kind != "video":
+                real = _sniff_image_ext(dst)
+                if real and real != ext.lower():
+                    fixed = os.path.join(folder, f"{stem}{i:02d}{tag}{real}")
+                    os.replace(dst, fixed)
 
             live = (item or {}).get("live") or ""
             if live:
@@ -2230,6 +2916,9 @@ class Engine:
             rec = next(
                 (r for r in self.store.all() if r.get("source_url") == url), None
             )
+            # 公众号视频直链是页面现签发的，过期就 403。下载前换一次新地址。
+            if rec and rec.get("platform") == "微信公众号":
+                rec = self._refresh_wechat_rec(rec)
             if rec and rec.get("media_json") and rec.get("content_type") in ("images", "live"):
                 self._download_media_list(url, rec, index)
                 return

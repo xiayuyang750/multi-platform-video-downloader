@@ -337,19 +337,33 @@ private fun HistoryItem(
                     GalleryBox(video, onPageChange = { page = it })
                 } else {
                     PlayerBox(video)
-                    if (video.playSource == null) {
+                    if (video.playSource == null &&
+                        video.contentType != "preview" && video.contentType != "text") {
                         Hint(
                             "该站点解析出的是音视频分离的流（B站、YouTube 等都已全面 DASH 化），" +
                                 "没有可直连播放的地址。下载后这里就能直接播放本地文件。"
                         )
                     }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(Dim.gap)) {
-                    PrimaryButton(
-                        text = if (video.isGallery) "下载全部" else "下载",
-                        onClick = onDownload,
-                        modifier = Modifier.weight(1f),
+                val noDownload = video.contentType == "preview" || video.contentType == "text"
+                if (noDownload) {
+                    Hint(
+                        if (video.contentType == "preview") {
+                            "视频号内容由微信客户端加密分发，本应用无法直接下载" +
+                                "（微信内一般也没有「保存视频」入口）。"
+                        } else {
+                            "这篇公众号是纯文字，没有可下载的图片或视频。"
+                        }
                     )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(Dim.gap)) {
+                    if (!noDownload) {
+                        PrimaryButton(
+                            text = if (video.isGallery) "下载全部" else "下载",
+                            onClick = onDownload,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                     if (video.isGallery) {
                         // 和解析页一致：滑到哪张就能单独下哪张
                         GhostButton(

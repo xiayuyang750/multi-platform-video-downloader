@@ -208,7 +208,13 @@ private fun CoverLayer(
                     ) {
                         PlatformBadge(video.platform, size = 36)
                         androidx.compose.material3.Text(
-                            "该站点是音视频分轨流，需下载后才能播放",
+                            when (video.contentType) {
+                                // 视频号：不是分轨问题，是服务端根本不下发视频流
+                                "preview" -> "视频号内容不支持直接下载"
+                                // 公众号纯文字：本来就没有可播的东西
+                                "text" -> "纯文字内容，没有可播放的媒体"
+                                else -> "该站点是音视频分轨流，需下载后才能播放"
+                            },
                             color = Color.White,
                             fontSize = Font.hint,
                             textAlign = TextAlign.Center,
@@ -264,11 +270,10 @@ private fun ExoPlayerView(
     val player = remember(source) {
         ExoPlayer.Builder(context).build().apply {
             val item = MediaItem.fromUri(toPlayableUri(source))
-            // 抖音的直链 CDN 会校验 Referer，不带会被拒。下载路径由 Python 侧
-            // 单独加了头，播放这条路径得在这里自己加。
-            if (source.contains("douyinvod.com")) {
-                val factory = DefaultHttpDataSource.Factory()
-                    .setDefaultRequestProperties(mapOf("Referer" to "https://www.douyin.com/"))
+            // 抖音 / 公众号视频的 CDN 会校验请求头：抖音要 Referer，
+            // 公众号视频连 UA 都校验（详见 dataSourceFactory 的说明）。
+            val factory = dataSourceFactory(source)
+            if (factory != null) {
                 setMediaSource(
                     ProgressiveMediaSource.Factory(factory).createMediaSource(item)
                 )
@@ -583,10 +588,10 @@ private fun LiveMotion(
     val context = LocalContext.current
     val player = remember(url) {
         ExoPlayer.Builder(context).build().apply {
-            // 抖音的视频 CDN 会校验 Referer；推特的不用，带上别的站点的 Referer 反而可能被拒
-            if (url.contains("douyinvod.com")) {
-                val factory = DefaultHttpDataSource.Factory()
-                    .setDefaultRequestProperties(mapOf("Referer" to "https://www.douyin.com/"))
+            // 抖音 / 公众号的视频 CDN 会校验请求头；推特、微博的不用，
+            // 带上别的站点的头反而可能被拒。
+            val factory = dataSourceFactory(url)
+            if (factory != null) {
                 setMediaSource(
                     ProgressiveMediaSource.Factory(factory)
                         .createMediaSource(MediaItem.fromUri(url))
@@ -668,3 +673,26 @@ private fun toPlayableUri(source: String): String =
     } else {
         source
     }
+
+/** 公众号视频 CDN 只放行「像浏览器/微信」的 UA；ExoPlayer 默认 UA 会被 403。 */
+private const val MPVIDEO_UA =
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 " +
+        "(KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.49 NetType/WIFI Language/zh_CN"
+
+/**
+ * 按 CDN 域名配 HTTP 数据源；不需要特殊请求头的返回 null（照常 setMediaItem）。
+ *
+ * `mpvideo.qpic.cn`（公众号文章里的视频）同时校验 Referer 和 UA：
+ * 实测带 Referer 但用 ExoPlayer 默认 UA 仍然 403，界面表现就是预览黑屏、
+ * 时长 0:00；换成微信 UA 后正常。
+ */
+private fun dataSourceFactory(url: String): DefaultHttpDataSource.Factory? = when {
+    url.contains("douyinvod.com") ->
+        DefaultHttpDataSource.Factory()
+            .setDefaultRequestProperties(mapOf("Referer" to "https://www.douyin.com/"))
+    url.contains("mpvideo.qpic.cn") ->
+        DefaultHttpDataSource.Factory()
+            .setUserAgent(MPVIDEO_UA)
+            .setDefaultRequestProperties(mapOf("Referer" to "https://mp.weixin.qq.com/"))
+    else -> null
+}

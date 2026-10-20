@@ -247,6 +247,11 @@ data class Video(
     val id: String,
     val platform: String,
     val title: String,
+    /**
+     * 正文（纯文本）。目前只有微信公众号会带：文章段落 / 贴图描述。
+     * 其他平台的历史记录里为空串，界面按「没有就不显示」处理。
+     */
+    val description: String = "",
     val uploader: String,
     val uploaderId: String,
     val duration: Int?,
@@ -374,6 +379,7 @@ data class Video(
             id = o.optString("id"),
             platform = o.optString("platform"),
             title = o.optString("title"),
+            description = o.optString("description"),
             uploader = o.optString("uploader"),
             uploaderId = o.optString("uploader_id"),
             duration = o.optIntOrNull("duration"),
@@ -401,6 +407,7 @@ data class Video(
             id = o.optString("id"),
             platform = o.optString("platform"),
             title = o.optString("title"),
+            description = o.optString("description"),
             uploader = o.optString("uploader"),
             uploaderId = o.optString("uploader_id"),
             duration = o.optIntOrNull("duration"),

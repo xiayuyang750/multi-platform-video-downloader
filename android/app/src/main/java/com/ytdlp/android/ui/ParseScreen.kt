@@ -1,5 +1,7 @@
 package com.ytdlp.android.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -42,6 +44,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -387,6 +390,8 @@ private fun ResultCard(
     // 名字不能叫 spec：下面 Card 块里已有一个同名局部变量（画质/体积那行），
     // 会把它遮蔽成 List<String>，编译器只报「类型不匹配」而不告诉你原因。
     val tierSpec = video.tierList.getOrNull(tierIndex)?.specJson.orEmpty()
+    // 视频号只有预览卡片、纯文字文章没有媒体：这两种都不给下载按钮
+    val canDownload = video.contentType != "preview" && video.contentType != "text"
     Card {
         // 平台 + 作者一行
         Row(
@@ -434,6 +439,12 @@ private fun ResultCard(
             Text(spec.joinToString(" · "), fontSize = Font.meta, color = tone.textMuted)
         }
 
+        // 正文（目前只有微信公众号会带）。默认折 4 行，长文不把下载按钮顶出屏幕。
+        if (video.description.isNotBlank()) {
+            Spacer(Modifier.height(Dim.gap))
+            BodyBlock(video.description)
+        }
+
         Spacer(Modifier.height(Dim.gapLg))
 
         if (video.isGallery) {
@@ -455,7 +466,7 @@ private fun ResultCard(
         // MD5 一行 + 「下载时自动改 MD5」开关，都放在下载按钮**上方** ——
         // 它们描述的是「这次下载会怎么处理文件」，属于下载前的设定。
         // 图文 / 图集不显示：那类产物是一个目录，没有「单个文件的 MD5」这回事。
-        if (!video.isGallery) {
+        if (canDownload && !video.isGallery) {
             Spacer(Modifier.height(Dim.gapLg))
             Text(
                 md5Line(video, tierIndex),
@@ -489,31 +500,47 @@ private fun ResultCard(
 
         Spacer(Modifier.height(Dim.gapLg))
 
-        Row(horizontalArrangement = Arrangement.spacedBy(Dim.gap)) {
-            PrimaryButton(
-                text = if (download.active) "下载中…" else if (video.isGallery) "下载全部" else "下载",
-                onClick = { onDownload(tierSpec) },
-                enabled = !download.active,
-                modifier = Modifier.weight(1f),
+        if (!canDownload) {
+            Text(
+                if (video.contentType == "preview") {
+                    // 视频号：说清楚为什么没有下载按钮。微信内通常也不提供「保存视频」，
+                    // 所以不给用户一个做不到的指引。
+                    "视频号内容由微信客户端加密分发，本应用无法直接下载" +
+                        "（微信内一般也没有「保存视频」入口）。"
+                } else {
+                    "这篇公众号是纯文字，没有可下载的图片或视频；正文可以直接复制。"
+                },
+                fontSize = Font.meta,
+                lineHeight = 20.sp,
+                color = tone.textMuted,
             )
-            // 图集才给「下载这张」：视频没有"第几张"的概念
-            if (video.isGallery) {
-                GhostButton(
-                    text = "下载第 ${page + 1} 张",
-                    onClick = { onDownloadPage(page + 1, tierSpec) },
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(Dim.gap)) {
+                PrimaryButton(
+                    text = if (download.active) "下载中…" else if (video.isGallery) "下载全部" else "下载",
+                    onClick = { onDownload(tierSpec) },
                     enabled = !download.active,
                     modifier = Modifier.weight(1f),
                 )
-            }
-            // 档位选择器放最右：它是次要操作，靠边不抢下载按钮的位置。
-            // 只有一个档位等于没得选，不显示；图文 / 图集 / 实况图本身没有档位。
-            if (video.tierList.size > 1) {
-                TierSelector(
-                    tiers = video.tierList,
-                    index = tierIndex,
-                    enabled = !download.active,
-                    onSelect = { tierIndex = it },
-                )
+                // 图集才给「下载这张」：视频没有"第几张"的概念
+                if (video.isGallery) {
+                    GhostButton(
+                        text = "下载第 ${page + 1} 张",
+                        onClick = { onDownloadPage(page + 1, tierSpec) },
+                        enabled = !download.active,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                // 档位选择器放最右：它是次要操作，靠边不抢下载按钮的位置。
+                // 只有一个档位等于没得选，不显示；图文 / 图集 / 实况图本身没有档位。
+                if (video.tierList.size > 1) {
+                    TierSelector(
+                        tiers = video.tierList,
+                        index = tierIndex,
+                        enabled = !download.active,
+                        onSelect = { tierIndex = it },
+                    )
+                }
             }
         }
 
@@ -620,6 +647,39 @@ private fun md5Line(video: com.ytdlp.android.engine.Video, tierIndex: Int): Stri
  */
 private fun shortTierLabel(label: String?): String =
     (label ?: "").substringBefore(" · ").ifBlank { "规格" }
+
+/**
+ * 正文块：默认折 4 行，长文可展开/收起，并支持一键复制。
+ *
+ * 微信文章的正文动辄上千字，全量铺开会把播放区和下载按钮顶出屏幕，所以默认折叠。
+ * 复制按钮只复制正文本身（不含标题），和用户对「复制正文」的直觉一致。
+ */
+@Composable
+private fun BodyBlock(text: String) {
+    var expanded by remember(text) { mutableStateOf(false) }
+    val context = LocalContext.current
+    Column {
+        Text(
+            text,
+            fontSize = Font.meta,
+            lineHeight = 20.sp,
+            color = tone.textMuted,
+            maxLines = if (expanded) Int.MAX_VALUE else 4,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(Dim.gap)) {
+            TextButton(onClick = { expanded = !expanded }) {
+                Text(if (expanded) "收起" else "展开", fontSize = Font.meta, color = tone.accent)
+            }
+            TextButton(onClick = {
+                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                cm?.setPrimaryClip(ClipData.newPlainText("正文", text))
+            }) {
+                Text("复制正文", fontSize = Font.meta, color = tone.accent)
+            }
+        }
+    }
+}
 
 /**
  * 跳到系统的「所有文件访问权限」设置页。
