@@ -325,26 +325,40 @@ A/B 实测（同一 id，同一时段）：
 - **微博音频（原第 9 条）**：`https://video.weibo.com/show?fid=2373717:5354042722025479` 真机解析成功，产物 `mp3`，作者「快乐亚军runner-up」，时长 1:59:07。
 - **抖音公共参数修复**：见第十节，已真机复验。
 
-#### 11.2 卡住的一条：微博「长视频」与「合集帖」
+#### 11.2 微博「长视频」与「合集帖」：已修（2026-10-20）
 
 **两条样本**
 
 - 长视频：`https://weibo.com/2/detail/5325042800918817`
 - 合集帖（原第 8 条）：`https://weibo.com/7923767750/5350266291619226`
 
-**症状**：yt-dlp 报 `ERROR: [Weibo] Extractor failed to obtain "id"`，界面显示「该站点可能改版了」。
+**原症状**：yt-dlp 报 `Extractor failed to obtain "id"`，界面显示「该站点可能改版了」；合集帖另有一种表现是把 9 张实况图当成「音视频分轨视频」，下载后无产物。
 
-**已查明的根因（真机 `weibodiag` 日志实证）**
+**根因（真机 `weibodiag` 日志实证）**
 
-1. 这两条报的错不是 `No video formats found!`，而现有兜底只认那一个字符串，所以**没有转去浏览器模式**。
-2. 让它们改走浏览器模式后，`m.weibo.cn/detail/<mid>` 能读到 `$render_data.status`，但：
-   - `pics` 为空
-   - `page_info` 里没有视频流
-   - 视频是**以链接形式写在正文 `text` 里**：`https://video.weibo.com/show?fid=1034:4612557713899533`
+1. 这两条报的错不是 `No video formats found!`，而旧兜底只认那一个字符串，所以**没有转去浏览器模式**。
+2. 浏览器模式读到的 `$render_data.status` 里：
+   - 合集帖：`pics` 有 9 项，每项带 `videoSrc` → 实况图合集（与已通过的第 6、7 条同构）。
+   - 长视频：`pics` 为空、`page_info` 无视频流，视频是**以链接形式写在正文 `text` 里**：
+     `https://video.weibo.com/show?fid=1034:4612557713899533`。
 
-**因此正确做法**（尚未实施）：在 `WeiboParser` 里补一条分支 —— 当 `pics` 为空且 `page_info` 无视频流时，用正则从 `status.text` 里捞 `video.weibo.com/show?fid=<fid>`，命中则把该 fid 交给已有的视频解析链路（与「视频」类样本 `fid=1034:5352599482728545` 同一条路）。
+**改动（提交 `352a8b4`）**
 
-**注意**：本轮曾临时把兜底条件放宽成 `_WEIBO_WEBVIEW_TRIGGERS`（含 `failed to obtain "id"`），但因后续取数未实现、会给用户「只有文字」的**误导性结论**，已**主动回退**，代码停在已验证状态。下次做时不要只放宽兜底、必须连同 11.2 的取数分支一起做。
+| 位置 | 改动 |
+|---|---|
+| `ytdlp_engine.py` | 新增 `_WEIBO_VIDEO_PAGE` / `_WEIBO_POST_PAGE`；微博**正文类**链接直接返回 `need_webview/weibo`，不再先喂 yt-dlp；`video.weibo.com`、`weibo.com/tv/show` 仍走 yt-dlp；`card.weibo.com/article` 并入头条文章分支 |
+| `WeiboParser.kt` | 新增 `WeiboDetail.Redirect(url)`；`ctype == "none"` 时先正则捞正文里的 `video.weibo.com/show?fid=<fid>`，命中则返回 Redirect |
+| `WeiboActivity.kt` | 处理 Redirect，把目标 URL 以 `redirect_url` 字段回传 |
+| `AppViewModel.kt` | `parse()` 拆出 `launchParse()`；收到 `redirect_url` 时用它再解析一次，**不过授权门禁、不重复扣试用次数** |
+
+**真机复验**
+
+| 样本 | 结果 |
+|---|---|
+| 合集帖 `5350266291619226` | ✅ 微博 / 「木质香回涩在秋天的小巷…」/ 你的虎牙钉真的可爱 / **实况图 · 共 9 张** |
+| 长视频 `weibo.com/2/detail/5325042800918817` | ✅ 微博 / 「【纪录片.BBC.巴塔哥尼亚.地球秘密乐园…」/ 猛犸君侯 / **2:57:04 · 720p · H.264 · 1835.2 MB**（重定向到 `fid=1034:4612557713899533` 后由 yt-dlp 解析） |
+
+**代价**：微博正文类链接现在要多等几秒（浏览器加载 + 过访客验证）；视频页不受影响。
 
 #### 11.3 未开始
 
