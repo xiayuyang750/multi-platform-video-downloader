@@ -47,6 +47,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -93,7 +94,14 @@ fun PlayerBox(
     // 播放器透明度，播放器就永远停在 alpha=0 —— 既看不到控件，也没有进度条可拖
     // （用户实测反馈：「音频能播放，但预览没有进度条」）。所以纯音频在点击播放后
     // 直接把播放器显示出来，并让封面继续垫在底下当背景。
-    val audioOnly = video.playKind == "audio"
+    //
+    // 但**不能只信 `playKind`**：解析阶段判定纯音频要依赖 yt-dlp 的格式元数据，
+    // 有些内容（实测微博音频）拿到的格式 `vcodec` 不是 `"none"`，于是被判成
+    // progressive —— 结果音轨照常出声、却没有视频轨，首帧永远不来，播放器与
+    // 控件一起隐在 alpha=0 后面：没有进度条、没有暂停键，只能退出应用。
+    // 所以再叠一层「播放器实际轨道」的判定，由 ExoPlayerView 回调上来。
+    var audioOnlyDetected by remember(video.id, source) { mutableStateOf(false) }
+    val audioOnly = video.playKind == "audio" || audioOnlyDetected
 
     val playerAlpha by animateFloatAsState(
         targetValue = if (audioOnly) (if (playing) 1f else 0f) else (if (firstFrameReady) 1f else 0f),
@@ -147,6 +155,7 @@ fun PlayerBox(
                     audioOnly = audioOnly,
                     onFirstFrame = { firstFrameReady = true },
                     onVideoAspect = { aspect = it },
+                    onTracksResolved = { noVideoTrack -> audioOnlyDetected = noVideoTrack },
                     modifier = Modifier
                         .fillMaxSize()
                         .alpha(playerAlpha),
@@ -243,12 +252,14 @@ private fun ExoPlayerView(
     onVideoAspect: (Float) -> Unit,
     modifier: Modifier = Modifier,
     audioOnly: Boolean = false,
+    onTracksResolved: (noVideoTrack: Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     // remember 块只执行一次，直接引用 onFirstFrame 会捕获首次组合时的 lambda；
     // rememberUpdatedState 保证回调始终指向最新的那个
     val firstFrameCallback by rememberUpdatedState(onFirstFrame)
     val aspectCallback by rememberUpdatedState(onVideoAspect)
+    val tracksCallback by rememberUpdatedState(onTracksResolved)
 
     val player = remember(source) {
         ExoPlayer.Builder(context).build().apply {
@@ -295,6 +306,21 @@ private fun ExoPlayerView(
                     // 夹一下范围：畸形值（0、极端长宽比）会把布局算爆
                     aspectCallback((w.toFloat() / h).coerceIn(0.4f, 3f))
                 }
+
+                /**
+                 * 轨道确定后告诉界面「这条内容有没有视频轨」。
+                 *
+                 * 纯音频内容不会触发 [onRenderedFirstFrame]，界面若只按首帧决定
+                 * 播放器透明度，就会永远停在 alpha=0：声音在放，但进度条和暂停键
+                 * 都看不见（用户实测反馈）。这里用真实轨道做判定，比解析阶段的
+                 * 格式元数据更可靠。
+                 */
+                override fun onTracksChanged(tracks: Tracks) {
+                    val hasVideo = tracks.groups.any { g ->
+                        g.type == androidx.media3.common.C.TRACK_TYPE_VIDEO && g.isSupported
+                    }
+                    tracksCallback(!hasVideo)
+                }
             })
             playWhenReady = true
             prepare()
@@ -323,6 +349,19 @@ private fun ExoPlayerView(
                     // 播放器背景保持黑色，与网页端 .player-video 一致
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
                 }
+            }
+        },
+        // 轨道解析出来之后 audioOnly 可能从 false 变成 true（见 onTracksChanged），
+        // 这里跟着重设一次控件与背景，否则新判定不会生效。
+        update = { view ->
+            if (audioOnly) {
+                view.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                view.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                view.controllerShowTimeoutMs = 0
+                view.showController()
+            } else {
+                view.setShutterBackgroundColor(android.graphics.Color.BLACK)
+                view.controllerShowTimeoutMs = 5000
             }
         },
         modifier = modifier,
@@ -448,12 +487,17 @@ fun GalleryBox(
                         // 静态图先垫在底下：动效还没渲染出来时看得到画面，不会先黑一下
                         //
                         // Referer **按平台给**：抖音的图片 CDN 会校验它，不带会被拒；
-                        // 而小红书的图片带「别的站点的」Referer 反而会被拒 —— 实测就是
+                        // 小红书的图片带「别的站点的」Referer 反而会被拒 —— 实测就是
                         // 预览区一直白屏、而下载（不带 Referer）却一切正常，差别只在这里。
+                        // 微博同理（`*.sinaimg.cn` 判盗链）：带抖音 Referer 会白屏，
+                        // 必须带微博自己的 —— 下载侧也按同一规则加了头。
                         val imageReq = ImageRequest.Builder(context).data(item.url).crossfade(true)
-                        if (video.platform != "小红书") {
-                            imageReq.addHeader("Referer", "https://www.douyin.com/")
+                        val referer = when (video.platform) {
+                            "抖音" -> "https://www.douyin.com/"
+                            "微博" -> "https://weibo.com/"
+                            else -> null
                         }
+                        if (referer != null) imageReq.addHeader("Referer", referer)
                         AsyncImage(
                             model = imageReq.build(),
                             contentDescription = null,

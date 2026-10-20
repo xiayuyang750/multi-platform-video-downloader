@@ -1694,7 +1694,7 @@ class Engine:
 
         优先级：
           1. 界面选中的档位（spec 里的直链）—— 用户在结果区选了规格就用它；
-          2. 备用链路已入库的默认档直链（抖音 / X）；
+          2. 备用链路已入库的默认档直链（抖音 / X / 小红书）；
           3. 原链接。
         """
         # 选中的档位优先。这条路径是「选哪个下哪个」，不需要 yt-dlp 参与 ——
@@ -2068,11 +2068,15 @@ class Engine:
 
         total = len(items)
         done = 0
-        # Referer 按平台给：抖音的图片 CDN 会校验它，而推特那边不需要、
-        # 带上别人的 Referer 反而可能被 CDN 拒掉。
+        # Referer 按平台给：抖音的图片 CDN 会校验它，不带会被拒；微博的
+        # `*.sinaimg.cn` 反过来 —— 带**别人的** Referer 会被判成盗链直接 403
+        # （实测：只带 UA 请求返回 `HTTP Error 403: Forbidden`），必须带微博自己的。
         headers = {"User-Agent": _BROWSER_UA}
-        if rec.get("platform") == "抖音":
+        _platform = rec.get("platform")
+        if _platform == "抖音":
             headers["Referer"] = "https://www.douyin.com/"
+        elif _platform == "微博":
+            headers["Referer"] = "https://weibo.com/"
         for i, item in items:
             src = (item or {}).get("url") or ""
             if not src:
