@@ -19,6 +19,7 @@ import com.ytdlp.android.engine.Engine
 import com.ytdlp.android.engine.Settings
 import com.ytdlp.android.engine.UpdateChecker
 import com.ytdlp.android.engine.Video
+import com.ytdlp.android.engine.WeiboParser
 import com.ytdlp.android.firstUrl
 import com.ytdlp.android.license.DeviceId
 import com.ytdlp.android.license.LicenseApi
@@ -272,7 +273,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         // 授权门禁：试用次数用完且未激活时，直接弹输入密钥的框，不发起解析
         if (!licenseGate()) return
         trialCharged = false
+        launchParse(target)
+    }
 
+    /**
+     * 真正发起解析。
+     *
+     * 拆出来是因为「正文里挂视频」那条路要**接着上一次解析**再跑一遍：那属于同一次
+     * 用户操作，不能再过一次授权门禁、也不能把 `trialCharged` 重置后重复扣次数。
+     */
+    private fun launchParse(target: String) {
         _parse.value = ParseUi.Loading
         parseJob = viewModelScope.launch {
             // Python 调用是阻塞的，withTimeoutOrNull 拦不住它 —— 超时后界面
@@ -339,11 +349,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * 微博 WebView 解析页返回后的回调。
      *
-     * 与上面两条的差别只在「交给引擎哪个入库入口」。
+     * 与上面两条的差别有两处：
+     *   1. 交给引擎的入库入口是 `saveWeibo`；
+     *   2. 多一种返回值 —— 正文里挂的是视频链接时，解析页会回传目标 URL，
+     *      这里接着用这条 URL 再解析一次（视频页走 yt-dlp，已验证可用）。
      */
-    fun onWeiboResult(payloadJson: String?, reason: String) = onWebviewResult(
-        payloadJson, reason, "浏览器模式没能取到这条微博的数据。",
-    ) { Engine.saveWeibo(ctx, it) }
+    fun onWeiboResult(payloadJson: String?, reason: String) {
+        val redirect = payloadJson
+            ?.let {
+                runCatching {
+                    org.json.JSONObject(it).optString(WeiboParser.PAYLOAD_REDIRECT)
+                }.getOrNull()
+            }
+            .orEmpty()
+        if (redirect.isNotBlank()) {
+            _url.value = redirect
+            launchParse(redirect)
+            return
+        }
+        onWebviewResult(payloadJson, reason, "浏览器模式没能取到这条微博的数据。") {
+            Engine.saveWeibo(ctx, it)
+        }
+    }
 
     private fun onWebviewResult(
         payloadJson: String?,

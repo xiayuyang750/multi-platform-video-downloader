@@ -17,6 +17,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.ytdlp.android.engine.WeiboDetail
 import com.ytdlp.android.engine.WeiboParser
+import org.json.JSONObject
 import java.io.ByteArrayInputStream
 
 /**
@@ -155,6 +156,12 @@ class WeiboActivity : Activity() {
                 when (val d = WeiboParser.buildPayload(pulled, shareUrl)) {
                     is WeiboDetail.Note -> {
                         deliver(d.payload.toString())
+                        return@evaluateJavascript
+                    }
+                    is WeiboDetail.Redirect -> {
+                        // 正文里挂的是视频链接：把目标 URL 回传给 ViewModel，
+                        // 由它用这条 URL 再跑一次解析（视频页走 yt-dlp）。
+                        deliver(JSONObject().put(WeiboParser.PAYLOAD_REDIRECT, d.url).toString())
                         return@evaluateJavascript
                     }
                     is WeiboDetail.Unavailable -> {

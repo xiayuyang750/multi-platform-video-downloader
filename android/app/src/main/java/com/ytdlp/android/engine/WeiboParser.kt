@@ -15,6 +15,17 @@ import org.json.JSONObject
  */
 sealed class WeiboDetail {
     data class Note(val payload: JSONObject) : WeiboDetail()
+
+    /**
+     * 正文里挂的是一个视频链接，需要拿这条 URL 再解析一次。
+     *
+     * 实测样本 `weibo.com/2/detail/5325042800918817`：页面 `pics` 为空、
+     * `page_info` 里没有视频流，但正文文本里写着
+     * `https://video.weibo.com/show?fid=1034:4612557713899533`。
+     * 这类帖子（微博很常见）只能先捞链接、再交给视频链路。
+     */
+    data class Redirect(val url: String) : WeiboDetail()
+
     data object None : WeiboDetail()
     data class Unavailable(val message: String) : WeiboDetail()
 }
@@ -104,6 +115,10 @@ object WeiboParser {
             else -> "none"
         }
         if (ctype == "none") {
+            // 正文里可能挂着一个视频（长视频帖常见）。`$render_data.status.text`
+            // 是 HTML 转义后的字符串，但 URL 本身是明文，直接正则即可。
+            videoLinkInText(status.optString("text"))?.let { return WeiboDetail.Redirect(it) }
+
             val text = status.optString("text").replace(Regex("<[^>]+>"), "").trim()
             return WeiboDetail.Unavailable(
                 if (text.isBlank())
@@ -128,4 +143,24 @@ object WeiboParser {
         }
         return WeiboDetail.Note(payload)
     }
+
+    /**
+     * 从正文文本里捞视频链接，返回可再次解析的完整 URL。
+     *
+     * 微博正文里的视频有两种写法：
+     *   · `https://video.weibo.com/show?fid=1034:4612557713899533`（常见）
+     *   · 少数是 `https://weibo.com/tv/show/1034:...`
+     * 只认前者：后者实测极少出现在正文里，多一种正则就多一份误判风险。
+     */
+    private val VIDEO_LINK = Regex(
+        """video\.weibo\.com/show\?fid=([0-9A-Za-z:_-]+)"""
+    )
+
+    private fun videoLinkInText(text: String): String? {
+        val fid = VIDEO_LINK.find(text)?.groupValues?.getOrNull(1) ?: return null
+        return "https://video.weibo.com/show?fid=$fid"
+    }
+
+    /** 回传「需要再解析一次」的 URL 时用的 payload 字段名（解析页与 ViewModel 共用）。 */
+    const val PAYLOAD_REDIRECT = "redirect_url"
 }

@@ -86,6 +86,21 @@ MAX_NAME_BYTES = 200
 # 主机要求带点，是为了不把 "abc://def" 这种随手打的当成链接放过去。
 _URL_SHAPE = re.compile(r"^[a-z][a-z0-9+.\-]*://[^\s/?#]+\.[^\s/?#]+", re.I)
 
+# 微博「视频页」：这些形态 yt-dlp 能直接解析，保持走 yt-dlp（快）。
+#   · https://video.weibo.com/show?fid=1034:5352599482728545
+#   · https://weibo.com/tv/show/1034:4797699866951785
+_WEIBO_VIDEO_PAGE = re.compile(
+    r"(^|//)([a-z0-9-]+\.)*(video\.weibo\.com|weibo\.com/tv/show)", re.I
+)
+
+# 微博「正文页」：`weibo.com/<uid>/<mid>` 与 `weibo.com/<uid>/detail/<mid>`。
+# 这类页面里到底装的是视频、图文、图集还是实况图，只有页面自己知道 ——
+# 实测 yt-dlp 会误判（把 9 张实况图当成一个「音视频分轨视频」，下载后无产物），
+# 或者直接报 `Extractor failed to obtain "id"`。所以统一先走浏览器读权威数据。
+_WEIBO_POST_PAGE = re.compile(
+    r"(^|//)([a-z0-9-]+\.)*weibo\.com/\d+/(detail/)?[0-9A-Za-z]{6,}", re.I
+)
+
 
 def looks_like_url(text: str) -> bool:
     """判断输入是不是一条链接。
@@ -1212,7 +1227,7 @@ class Engine:
 
         # 微博头条文章是另一种页面（`weibo.com/ttarticle/...`，文章 id 还在 `#`
         # 后面）—— yt-dlp 没有任何提取器认它，直接交给浏览器模式。
-        if platform == "微博" and "ttarticle" in url:
+        if platform == "微博" and ("ttarticle" in url or "card.weibo.com/article" in url):
             return {
                 "ok": False,
                 "need_webview": True,
@@ -1220,6 +1235,23 @@ class Engine:
                 "platform": "微博",
                 "source_url": url,
                 "error": "正在用浏览器模式读取这条头条文章。",
+            }
+
+        # 微博正文页同样先走浏览器，原因见 _WEIBO_POST_PAGE 的注释：
+        # yt-dlp 对这类页面会误判（9 张实况图 → 「音视频分轨视频」，下载后无产物）
+        # 或者直接报 `Extractor failed to obtain "id"`。浏览器读到的
+        # `$render_data.status` 才是权威数据：有 pics 就是图/实况，有
+        # page_info.stream_url 就是视频，都没有但正文里有视频链接就再转一次。
+        # 视频页（video.weibo.com / tv/show）仍走 yt-dlp，不受影响。
+        if platform == "微博" and not _WEIBO_VIDEO_PAGE.search(url) \
+                and _WEIBO_POST_PAGE.search(url):
+            return {
+                "ok": False,
+                "need_webview": True,
+                "webview_kind": "weibo",
+                "platform": "微博",
+                "source_url": url,
+                "error": "正在用浏览器模式读取这条微博。",
             }
 
         # X 把顺序反过来：**先**走第三方链路，yt-dlp 退居兜底。
