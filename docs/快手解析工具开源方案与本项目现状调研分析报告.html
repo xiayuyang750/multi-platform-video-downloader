@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>快手解析工具 · 开源方案调研与自研补齐报告 v2</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --card:#ffffff; --ink:#1a1d23; --ink2:#4a5260; --ink3:#7a8494;
+    --line:#e4e7ec; --line2:#eef0f4;
+    --brand:#2f5bea; --brand-soft:#eef2ff;
+    --green:#0f8a55; --green-soft:#e9f7f0;
+    --amber:#b26a00; --amber-soft:#fdf4e3;
+    --red:#c0392b; --red-soft:#fdeeec;
+    --purple:#6b4bd6; --purple-soft:#f2eefd;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.75;font-size:15px;-webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:0 28px 90px}
+  header{padding:60px 0 38px;border-bottom:1px solid var(--line);margin-bottom:40px}
+  .kicker{font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--brand);font-weight:700;margin-bottom:14px}
+  h1{font-size:33px;line-height:1.3;margin:0 0 16px;letter-spacing:-.02em;font-weight:800}
+  .sub{font-size:16px;color:var(--ink2);max-width:780px;margin:0 0 24px}
+  .meta{display:flex;flex-wrap:wrap;gap:10px}
+  .chip{font-size:12.5px;color:var(--ink2);background:var(--card);border:1px solid var(--line);
+    padding:5px 12px;border-radius:999px}
+  section{margin:0 0 54px}
+  h2{font-size:23px;margin:0 0 8px;padding-top:10px;letter-spacing:-.01em;font-weight:750}
+  h2 .num{color:var(--brand);font-variant-numeric:tabular-nums;margin-right:10px;font-weight:800}
+  .lead{color:var(--ink2);margin:0 0 22px;font-size:14.5px}
+  h3{font-size:17px;margin:30px 0 10px;font-weight:700}
+  h4{font-size:14.5px;margin:18px 0 8px;font-weight:700}
+  p{margin:0 0 14px}
+  ul,ol{margin:0 0 16px;padding-left:22px}
+  li{margin:5px 0}
+  code{font-family:var(--mono);font-size:12.5px;background:#f0f2f6;color:#3730a3;
+    padding:1.5px 5px;border-radius:4px;word-break:break-all}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin:0 0 18px}
+  .card.tight{padding:15px 18px}
+  .callout{border-radius:12px;padding:15px 19px;margin:0 0 18px;border:1px solid;font-size:14.2px}
+  .callout .t{font-weight:750;font-size:12.5px;letter-spacing:.04em;text-transform:uppercase;margin-bottom:6px}
+  .c-blue{background:var(--brand-soft);border-color:#d6e0ff}
+  .c-blue .t{color:var(--brand)}
+  .c-green{background:var(--green-soft);border-color:#cfeade}
+  .c-green .t{color:var(--green)}
+  .c-amber{background:var(--amber-soft);border-color:#f2e0bd}
+  .c-amber .t{color:var(--amber)}
+  .c-red{background:var(--red-soft);border-color:#f6d5d1}
+  .c-red .t{color:var(--red)}
+  .c-purple{background:var(--purple-soft);border-color:#e2daf9}
+  .c-purple .t{color:var(--purple)}
+  .tblwrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--card);margin:0 0 18px}
+  table{border-collapse:collapse;width:100%;font-size:13px;min-width:660px}
+  th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line2);vertical-align:top}
+  th{background:#fafbfd;font-weight:700;color:var(--ink2);font-size:12.5px;white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  .tag{display:inline-block;font-size:11.5px;padding:1px 8px;border-radius:999px;font-weight:650;white-space:nowrap}
+  .t-g{background:var(--green-soft);color:var(--green)}
+  .t-a{background:var(--amber-soft);color:var(--amber)}
+  .t-r{background:var(--red-soft);color:var(--red)}
+  .t-b{background:var(--brand-soft);color:var(--brand)}
+  .t-p{background:var(--purple-soft);color:var(--purple)}
+  .t-n{background:#f0f2f6;color:var(--ink2)}
+  pre{background:#1b1f2a;color:#e6e9f0;border-radius:12px;padding:17px 19px;overflow-x:auto;
+    font-family:var(--mono);font-size:12.5px;line-height:1.65;margin:0 0 18px}
+  pre .c{color:#7f8a9e}
+  pre .k{color:#c792ea}
+  pre .s{color:#a5d6a7}
+  pre .f{color:#82aaff}
+  .flow{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px;margin:0 0 18px}
+  .steps{counter-reset:s}
+  .step{position:relative;padding-left:42px;padding-bottom:18px;border-left:2px solid var(--line);margin-left:14px}
+  .step:last-child{border-left-color:transparent;padding-bottom:0}
+  .step::before{counter-increment:s;content:counter(s);position:absolute;left:-15px;top:-2px;
+    width:28px;height:28px;border-radius:50%;background:var(--brand);color:#fff;font-size:12.5px;
+    font-weight:700;display:flex;align-items:center;justify-content:center}
+  .step h4{margin:0 0 3px;font-size:14.5px}
+  .step p{margin:0;font-size:13.5px;color:var(--ink2)}
+  .repo{display:flex;gap:14px;align-items:baseline;padding:10px 0;border-bottom:1px dashed var(--line)}
+  .repo:last-child{border-bottom:none}
+  .repo .nm{font-weight:700;font-size:13.5px;min-width:185px}
+  .repo .ds{font-size:12.8px;color:var(--ink2);flex:1}
+  .upd{background:#fff;border:1px dashed #c9d6ff;border-radius:12px;padding:14px 18px;margin:0 0 26px;font-size:13.5px}
+  .upd b{color:var(--brand)}
+  footer{border-top:1px solid var(--line);padding-top:24px;color:var(--ink3);font-size:12.5px}
+  a{color:var(--brand);text-decoration:none;border-bottom:1px solid #c9d6ff}
+  @media print{
+    body{background:#fff}
+    .wrap{max-width:none;padding:0}
+    section{break-inside:avoid}
+    pre{background:#f5f6f8;color:#1a1d23;border:1px solid #e4e7ec}
+    pre .c{color:#8a93a3} pre .k{color:#8b3fa8} pre .s{color:#0f7b4d} pre .f{color:#2f5bea}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="kicker">Technical Research · v2 · 结合自研现状</div>
+  <h1>快手解析工具：开源方案调研与自研补齐报告</h1>
+  <p class="sub">
+    基于 GitHub 上近两年活跃项目的源码级拆解，叠加对自研项目「水印工坊」（yt-dIp）的只读审查与实际取证，
+    回答一个问题：<b>面向 Android 端的快手解析，哪些路已经被证明走得通，哪些是死路，剩下的缺口该怎么补。</b>
+  </p>
+  <div class="meta">
+    <span class="chip">检索：2026-10-22</span>
+    <span class="chip">精读源码：9 个项目 / 13 个文件</span>
+    <span class="chip">自研代码审查：ytdlp_engine.py 3909 行</span>
+    <span class="chip">覆盖：视频 / 图集 / 长图 / 单图 / 实况 / 直播</span>
+  </div>
+</header>
+
+<div class="upd">
+  <b>本版相对 v1 的改动：</b>
+  ① 新增第 4 章「实况图专项」——把「开源圈能不能解析快手实况」从推测升级为<b>代码级定案</b>（新增 <code>gumphp/video-parse</code> 作为决定性证据）；
+  ② 新增第 5 章「自研现状对照」——把你项目已覆盖的形态、缺口位置、技术栈约束写进报告；
+  ③ 技术路线从「通用五条」调整为<b>「按你的栈可落地性排序」</b>；
+  ④ 落地路线图换成针对本项目的 30 分钟 → 半天 → 3 天版本；
+  ⑤ 所有涉及你仓库的内容均为只读审查所得，未改动一行代码。
+</div>
+
+<!-- ============ 1 ============ -->
+<section>
+  <h2><span class="num">1</span>三条结论</h2>
+
+  <div class="callout c-blue">
+    <div class="t">结论一 · 快手是「页面内嵌状态」型平台</div>
+    抖音的公开解析几乎必须解决 <code>a_bogus</code> 签名，快手不用——<b>作品数据直接内联在详情页 HTML 的 <code>&lt;script&gt;</code> 里</b>
+    （移动端 <code>window.INIT_STATE</code>，PC 端 <code>window.__APOLLO_STATE__</code>）。
+    单条作品解析可以做到<b>零签名、零登录、纯 HTTP</b>。近两年只做单作品解析的项目，全部走这条路。
+    你的项目已经踩对了，见第 5 章。
+  </div>
+
+  <div class="callout c-green">
+    <div class="t">结论二 · 快手「实况图」的动效，开源圈没有一家做出来</div>
+    这不是"没人研究"，而是<b>网页 SSR 层根本不提供</b>。我用六份独立实现做了交叉验证：
+    连专门设计了 <code>livePhotoUrl</code> 字段的库（<code>gumphp/video-parse</code>），在快手这条链路上也<b>把字段空着不填</b>。
+    详见第 4 章。这意味着你反复尝试的方向不是"没找对字段"，而是<b>这个数据源里就没有</b>。
+  </div>
+
+  <div class="callout c-amber">
+    <div class="t">结论三 · 你的缺口比想象的小得多：一个空字符串</div>
+    审查发现你的数据模型与 Kotlin 侧<b>已经完整支持 <code>live</code> 字段</b>：
+    <code>Engine.kt</code> 读它、<code>content_type</code> 有 <code>"live"</code> 枚举、抖音和微博都已经在填。
+    快手只是没填——缺口精确到 <code>_ks_atlas_media()</code> 里那行 <code>"live": ""</code>。
+    <b>不需要动数据结构，不需要动 UI，不需要动 Kotlin。</b>
+  </div>
+</section>
+
+<!-- ============ 2 ============ -->
+<section>
+  <h2><span class="num">2</span>样本地图</h2>
+  <p class="lead">筛选口径：最后提交 ≥ 2024-10，且明确支持快手。按技术路线分组，星标为检索时快照。</p>
+
+  <div class="tblwrap">
+  <table>
+    <thead>
+      <tr><th>项目</th><th class="num">Star</th><th>语言</th><th>最后提交</th><th>核心路线</th><th>许可</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>JoeanAmier/KS-Downloader</b><br><span style="color:var(--ink3);font-size:12px">快手专用，工程质量最高</span></td>
+        <td class="num">880</td><td>Python</td><td>2026-09-16</td>
+        <td><span class="tag t-b">内部接口 + Cookie + TLS 指纹</span></td>
+        <td><span class="tag t-r">GPL-3.0</span></td>
+      </tr>
+      <tr>
+        <td><b>wujunwei928/parse-video</b><br><span style="color:var(--ink3);font-size:12px">Go，含 REST + Web UI</span></td>
+        <td class="num">1,074</td><td>Go</td><td>2026-08-21</td>
+        <td><span class="tag t-g">SSR 状态注入</span></td>
+        <td><span class="tag t-n">见仓库</span></td>
+      </tr>
+      <tr>
+        <td><b>gumphp/video-parse</b><br><span style="color:var(--ink3);font-size:12px">parse-video 的 PHP 移植，<b>决定性证据</b></span></td>
+        <td class="num">—</td><td>PHP</td><td>2025-11</td>
+        <td><span class="tag t-g">SSR 状态注入</span></td>
+        <td><span class="tag t-n">见仓库</span></td>
+      </tr>
+      <tr>
+        <td><b>CharlesPikachu/videodl</b><br><span style="color:var(--ink3);font-size:12px">老牌聚合器，快手模块近期重写</span></td>
+        <td class="num">3,109</td><td>Python</td><td>2026-10-22</td>
+        <td><span class="tag t-g">APOLLO_STATE + 浏览器兜底</span></td>
+        <td><span class="tag t-n">NOASSERTION</span></td>
+      </tr>
+      <tr>
+        <td><b>putyy/res-downloader</b><br><span style="color:var(--ink3);font-size:12px">桌面「资源嗅探器」，Go + Wails</span></td>
+        <td class="num">20,774</td><td>Go</td><td>2026-10-21</td>
+        <td><span class="tag t-p">MITM 代理嗅探</span></td>
+        <td><span class="tag t-g">Apache-2.0</span></td>
+      </tr>
+      <tr>
+        <td><b>jiuhunwl/short_videos</b><br><span style="color:var(--ink3);font-size:12px">PHP 单文件接口</span></td>
+        <td class="num">—</td><td>PHP</td><td>2026-10-15</td>
+        <td><span class="tag t-g">INIT_STATE → APOLLO 双兜底</span></td>
+        <td><span class="tag t-g">MIT</span></td>
+      </tr>
+      <tr>
+        <td><b>nbwzlyd/media-parser</b><br><span style="color:var(--ink3);font-size:12px">工厂模式，50+ 平台</span></td>
+        <td class="num">399</td><td>Python</td><td>2026-10-10</td>
+        <td><span class="tag t-g">双状态 + 多路由降级</span></td>
+        <td><span class="tag t-n">见仓库</span></td>
+      </tr>
+      <tr>
+        <td><b>NanmiCoder/MediaCrawler</b><br><span style="color:var(--ink3);font-size:12px">签名方案的权威参考</span></td>
+        <td class="num">67.5k</td><td>Python</td><td>活跃</td>
+        <td><span class="tag t-a">REST + __NS_hxfalcon 签名</span></td>
+        <td><span class="tag t-a">非商用条款</span></td>
+      </tr>
+      <tr>
+        <td><b>3441293738/creatorhub</b><br><span style="color:var(--ink3);font-size:12px">FastAPI + Playwright 本地面板</span></td>
+        <td class="num">2,503</td><td>Python</td><td>2026-10-22</td>
+        <td><span class="tag t-a">浏览器上下文驱动</span></td>
+        <td><span class="tag t-n">见仓库</span></td>
+      </tr>
+      <tr style="background:#fcfcfd">
+        <td><b>lux · you-get</b><br><span style="color:var(--ink3);font-size:12px">对照组：老牌 extractor</span></td>
+        <td class="num">—</td><td>Go / Py</td><td>较早</td>
+        <td><span class="tag t-n">正则抓 photoUrl（已脆弱）</span></td>
+        <td><span class="tag t-g">MIT</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout c-red">
+    <div class="t">许可证提醒</div>
+    <b>KS-Downloader 是 GPL-3.0</b>——闭源商业产品搬代码有传染性风险。
+    许可友好的是 <code>res-downloader</code>（Apache-2.0）、<code>short_videos</code>（MIT）、<code>lux</code>（MIT）。
+    但对你而言更现实：<b>只借鉴思路与字段地图，不复制代码</b>。
+  </div>
+</section>
+
+<!-- ============ 3 ============ -->
+<section>
+  <h2><span class="num">3</span>技术路线解剖</h2>
+  <p class="lead">五条路线，按「在你的技术栈上能不能落地」重新排序。</p>
+
+  <div class="flow">
+    <svg viewBox="0 0 960 250" width="100%" style="max-width:960px;display:block;margin:0 auto">
+      <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+        <path d="M0,0 L9,4.5 L0,9 z" fill="#9aa4b5"/></marker></defs>
+      <rect x="8" y="92" width="132" height="64" rx="10" fill="#eef2ff" stroke="#c9d6ff"/>
+      <text x="74" y="118" text-anchor="middle" font-size="13" font-weight="700" fill="#2f5bea">输入</text>
+      <text x="74" y="137" text-anchor="middle" font-size="10.5" fill="#4a5260">链接 / 口令</text>
+
+      <rect x="180" y="92" width="150" height="64" rx="10" fill="#fff" stroke="#e4e7ec"/>
+      <text x="255" y="118" text-anchor="middle" font-size="13" font-weight="700" fill="#1a1d23">归一键</text>
+      <text x="255" y="137" text-anchor="middle" font-size="10.5" fill="#4a5260">移动 UA 展开短链</text>
+      <line x1="140" y1="124" x2="176" y2="124" stroke="#9aa4b5" stroke-width="1.5" marker-end="url(#ar)"/>
+
+      <rect x="370" y="92" width="150" height="64" rx="10" fill="#f2eefd" stroke="#e2daf9"/>
+      <text x="445" y="118" text-anchor="middle" font-size="13" font-weight="700" fill="#6b4bd6">找作品对象</text>
+      <text x="445" y="137" text-anchor="middle" font-size="10.5" fill="#4a5260">按值定位 photoType</text>
+      <line x1="330" y1="124" x2="366" y2="124" stroke="#9aa4b5" stroke-width="1.5" marker-end="url(#ar)"/>
+
+      <rect x="560" y="8" width="168" height="56" rx="9" fill="#e9f7f0" stroke="#cfeade"/>
+      <text x="644" y="30" text-anchor="middle" font-size="12" font-weight="700" fill="#0f8a55">VIDEO</text>
+      <text x="644" y="48" text-anchor="middle" font-size="10" fill="#4a5260">manifest 多档 → 已完成</text>
+
+      <rect x="560" y="76" width="168" height="56" rx="9" fill="#e9f7f0" stroke="#cfeade"/>
+      <text x="644" y="98" text-anchor="middle" font-size="12" font-weight="700" fill="#0f8a55">*_ATLAS</text>
+      <text x="644" y="116" text-anchor="middle" font-size="10" fill="#4a5260">图片 ✓ · 动效 ✗</text>
+
+      <rect x="560" y="144" width="168" height="56" rx="9" fill="#e9f7f0" stroke="#cfeade"/>
+      <text x="644" y="166" text-anchor="middle" font-size="12" font-weight="700" fill="#0f8a55">SINGLE_PICTURE</text>
+      <text x="644" y="184" text-anchor="middle" font-size="10" fill="#4a5260">图片 ✓ · 动效 ✗</text>
+
+      <rect x="560" y="212" width="168" height="34" rx="9" fill="#fdf4e3" stroke="#f2e0bd"/>
+      <text x="644" y="234" text-anchor="middle" font-size="11" fill="#b26a00">动效地址 ← 待补</text>
+
+      <line x1="520" y1="112" x2="556" y2="40" stroke="#9aa4b5" stroke-width="1.5" marker-end="url(#ar)"/>
+      <line x1="520" y1="124" x2="556" y2="104" stroke="#9aa4b5" stroke-width="1.5" marker-end="url(#ar)"/>
+      <line x1="520" y1="136" x2="556" y2="172" stroke="#9aa4b5" stroke-width="1.5" marker-end="url(#ar)"/>
+
+      <rect x="772" y="76" width="180" height="120" rx="10" fill="#fff" stroke="#e4e7ec"/>
+      <text x="862" y="102" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1a1d23">统一 media[]</text>
+      <text x="862" y="122" text-anchor="middle" font-size="10.5" fill="#4a5260">url + live + kind</text>
+      <text x="862" y="140" text-anchor="middle" font-size="10.5" fill="#4a5260">→ 入库 media_json</text>
+      <text x="862" y="164" text-anchor="middle" font-size="10.5" fill="#0f8a55">结构已就绪</text>
+      <text x="862" y="182" text-anchor="middle" font-size="10.5" fill="#b26a00">只差填值</text>
+      <line x1="732" y1="112" x2="768" y2="120" stroke="#9aa4b5" stroke-width="1.5" marker-end="url(#ar)"/>
+      <line x1="732" y1="172" x2="768" y2="150" stroke="#9aa4b5" stroke-width="1.5" marker-end="url(#ar)"/>
+    </svg>
+  </div>
+
+  <h3>A · 页面内嵌状态注入 <span class="tag t-g">主路 · 你已在用</span></h3>
+  <p>
+    快手把服务端渲染的状态机直接写进 HTML：移动端落地页 <code>window.INIT_STATE</code>，
+    PC 详情页 <code>window.__APOLLO_STATE__</code>。拿到 JSON 就等于拿到整个作品对象。
+  </p>
+
+  <h4>两个必须处理的坑</h4>
+  <div class="card tight">
+    <p style="margin:0 0 8px"><b>坑一：JSON 里可能有非法片段。</b>会出现被二次字符串化的畸形数据、匿名函数、尾逗号。
+    方案是「先常规解析，失败再清洗」双保险。<code>media-parser</code> 更稳——手写括号配对扫描器，逐字符计数 <code>{}</code>
+    并处理字符串转义，精确截取对象边界。</p>
+    <p style="margin:0"><b>坑二：顶层 key 被位移混淆。</b><code>tusjoh</code> 是 <code>string</code> 逐字符 +1 的结果。
+    所以<b>不能按固定路径取值</b>，要么按前缀过滤，要么深度遍历找特征节点（同时含 <code>result</code> 与 <code>photo</code>，或 <code>photoId</code> 与 <code>photoType</code>）。后者抗变更最强。</p>
+  </div>
+
+  <h4>短链还原的精细做法</h4>
+<pre><span class="c">// wujunwei928/parse-video · parser/kuaishou.go</span>
+client.SetRedirectPolicy(resty.RedirectPolicyFunc(func(req *http.Request, via []*http.Request) error {
+    <span class="c">// 只跟随 /short-video/{id} 形态的跳转，其余中断以捕获 Location</span>
+    <span class="k">if</span> matched, _ := regexp.MatchString(<span class="s">`^/short-video/[^/]+/?$`</span>, req.URL.Path); !matched {
+        <span class="k">return</span> resty.ErrAutoRedirectDisabled
+    }
+    <span class="k">return</span> nil
+}))
+
+<span class="c">// 关键：长视频（短剧）路由返回结构不同，统一改写为 photo 路由</span>
+locationUrl = strings.ReplaceAll(locationUrl, <span class="s">"/fw/long-video/"</span>, <span class="s">"/fw/photo/"</span>)</pre>
+
+  <p>
+    这个 <code>/fw/long-video/ → /fw/photo/</code> 的改写是最容易漏的兼容点——
+    <b>短剧/长视频与普通视频走两套数据结构</b>，只按普通视频字段取会全空。
+  </p>
+
+  <h3>B · 内部接口 + Cookie <span class="tag t-a">你这条路上有个硬门槛</span></h3>
+  <p><b>KS-Downloader</b> 是这个路线的标杆，不做页面解析，直接打内部接口：</p>
+<pre><span class="c"># source/request/detail.py</span>
+self.api = <span class="s">"https://live.kuaishou.com/live_api/profile/feedbyid"</span>
+self.params = {<span class="s">"photoId"</span>: detail_id, <span class="s">"principalId"</span>: user_id}
+self.extract_keys = (<span class="s">"data"</span>, <span class="s">"currentWork"</span>)</pre>
+
+  <div class="tblwrap">
+  <table>
+    <thead><tr><th>代价</th><th>它的解法</th><th>你能否照做</th></tr></thead>
+    <tbody>
+      <tr><td><b>必须带 Cookie</b></td><td>从浏览器读，且注明<b>「无需登录」</b>（游客态即可）</td>
+        <td><span class="tag t-g">可以</span> 但要自己做 Cookie 获取/续期</td></tr>
+      <tr><td><b>TLS 指纹校验</b></td><td><code>curl_cffi</code> + <code>impersonate="chrome146"</code> 复刻浏览器 JA3</td>
+        <td><span class="tag t-r">很难</span> Chaquopy 没有 curl_cffi 轮子</td></tr>
+      <tr><td><b>请求头语义严格</b></td><td>固定 <code>Origin</code> + <code>Referer: /new-reco</code></td>
+        <td><span class="tag t-g">可以</span> 纯 header，无成本</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout c-amber">
+    <div class="t">对你的具体约束（第 5 章详述）</div>
+    你的 Android 端是 Chaquopy 嵌入 Python，<code>site-packages</code> 里只有 <code>attrs</code> / <code>retrying</code>，
+    <b>没有 requests，更没有 curl_cffi</b>，请求全靠 stdlib <code>urllib</code>。
+    所以「TLS 指纹模拟」这条路对你是关着的，只能靠「标准 TLS + 完整头 + 游客 Cookie」硬试。
+  </div>
+
+  <h4>再往上：签名 <code>__NS_hxfalcon</code>（sig4）</h4>
+  <ul>
+    <li>接口：<code>POST /rest/v/profile/feed</code>、<code>/rest/v/search/feed</code>，query 必须带 <code>?__NS_hxfalcon={sign}&amp;caver=2</code>；</li>
+    <li>语义：<code>result=1</code> 成功 / <code>2</code> 风控限流 / <code>50</code> 缺签名；</li>
+    <li>签名绑定请求体、时间窗、设备指纹，<b>不可复用</b>，每次重试都要重算；</li>
+    <li>形态是 <code>HUDR_****$HE_****</code>，藏 Webpack 的 Jose 模块 + JSVMP 虚拟化保护。</li>
+  </ul>
+  <p><b>结论：只在做「主页批量 / 关键词搜索」时才需要。你只做单条解析，直接绕开——这是产品设计上的重要取舍。</b></p>
+
+  <h3>C · 浏览器驱动 <span class="tag t-a">兜底，不是主路</span></h3>
+  <p>
+    <code>videodl</code> 的分层值得借鉴：按顺序尝试 <b>[DrissionPage] → [requests]</b>，前者拿到有效直链就短路。
+    浏览器模式只做三件事：打开页面、取 <code>&lt;video&gt;</code> 的 <code>src</code>、取 <code>[poster]</code> 作封面。
+    加固手段是关掉 <code>AutomationControlled</code> 特征、静音、随机端口。
+  </p>
+  <div class="callout c-amber">
+    <div class="t">顺序别抄反</div>
+    videodl 是「浏览器优先」，因为它要兼容几十个平台。你只做单平台，不该这样——
+    浏览器冷启动 2–5 秒、内存 300MB+、并发上不去。
+    正确顺序是 <b>HTTP 优先、浏览器兜底</b>，且兜底结果要缓存映射。
+    MediaCrawler 更彻底：浏览器只用来「算签名 / 拿 Cookie」，抓数据仍走 HTTP。
+  </div>
+
+  <h3>D · MITM 代理嗅探 <span class="tag t-n">桌面端专属</span></h3>
+  <p>
+    <code>res-downloader</code>（20.7k★，Apache-2.0）不做解析：起一个本地代理，让用户把系统代理指过来，
+    <b>解密流量、从响应里识别媒体资源</b>。两个设计值得看：
+  </p>
+  <div class="card tight">
+    <p style="margin:0 0 8px"><b><code>core/rule.go</code> —— 规则化 MITM 白名单。</b>
+    不是所有域名都解密（性能和风险都不允许）。支持 <code>*.domain</code> 通配、<code>!</code> 否定、<code>*</code> 全量；
+    <code>shouldMitm(host)</code> 返回 true 才解密，否则纯透传。让「抓快手但不抓网银」成为可实现的产品能力。</p>
+    <p style="margin:0"><b><code>core/middleware.go</code> —— 单端口同时承载控制 API 与代理流量。</b>
+    <code>/api/preview</code> 单独放开 CORS 且不限方法，说明<b>预览是它的第一等需求，不是下载</b>。</p>
+  </div>
+  <p>
+    <b>适应性极强</b>：平台改版、加签名、换域名都无所谓，因为地址是从真实播放流量里捡的，天生免疫接口变更。
+    代价是装根证书、手动配代理、移动端体验差——所以<b>对你 Android 客户端不适用</b>，但对你那个未同步的 Windows 端是个选项。
+  </p>
+
+  <h3>E · 第三方 SaaS 解析 <span class="tag t-n">应急车道</span></h3>
+  <p>
+    社区里有一批只卖接口的服务（<code>video.zacao.top</code>、云析这类），普遍宣称覆盖「抖音快手图集实况」。
+    对自研没有技术借鉴价值，但有一个产品价值：<b>作为新形态的临时兜底</b>。
+    前提是接口契约抽象好，切换成本才低。
+  </p>
+  <div class="callout c-red">
+    <div class="t">但别把它当长期方案</div>
+    这类服务的稳定性与合规性你无法控制——它挂了或改政策，你的产品跟着挂。
+    <b>兜底应该用你自己可控的第二条技术路线，而不是第二家公司。</b>
+  </div>
+</section>
+
+<!-- ============ 4 ============ -->
+<section>
+  <h2><span class="num">4</span>实况图专项：一个已被证否的方向</h2>
+  <p class="lead">这一章是本版新增的核心。结论先行：快手实况的动效，不在网页 SSR 数据里。</p>
+
+  <h3>4.1 六份实现的交叉验证</h3>
+  <p>判断「能不能解析快手实况」，最硬的证据不是 README 宣传，而是<b>代码里有没有真的填那个字段</b>。</p>
+
+  <div class="tblwrap">
+  <table>
+    <thead><tr><th>项目</th><th>是否设计了实况字段</th><th>快手是否真的填充</th><th>结论</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>gumphp/video-parse</b></td>
+        <td>✅ <code>ImgInfo { url, livePhotoUrl }</code></td>
+        <td>❌ 只 <code>new ImgInfo(url: ...)</code>，<code>livePhotoUrl</code> 空</td>
+        <td><span class="tag t-r">决定性反证</span></td>
+      </tr>
+      <tr>
+        <td><b>wujunwei928/parse-video</b></td>
+        <td>— 无 live 字段</td>
+        <td>❌ 只读 <code>mainMvUrls</code> + <code>atlas.list</code></td>
+        <td><span class="tag t-r">不支持</span></td>
+      </tr>
+      <tr>
+        <td><b>nbwzlyd/media-parser</b></td>
+        <td>✅ 抖音有 <code>{url, live_photo_url}</code></td>
+        <td>❌ 快手 parser 无该分支</td>
+        <td><span class="tag t-r">不支持</span></td>
+      </tr>
+      <tr>
+        <td><b>jiuhunwl/short_videos</b></td>
+        <td>✅ 支持矩阵标「实况」</td>
+        <td>❌ 快手只标「视频/图片/封面/作者」</td>
+        <td><span class="tag t-r">不支持</span></td>
+      </tr>
+      <tr>
+        <td><b>JoeanAmier/KS-Downloader</b></td>
+        <td>—</td>
+        <td>❌ 走 <code>feedbyid</code>，无实况处理</td>
+        <td><span class="tag t-r">不支持</span></td>
+      </tr>
+      <tr>
+        <td><b>CharlesPikachu/videodl</b></td>
+        <td>—</td>
+        <td>❌ 连图集都没做</td>
+        <td><span class="tag t-r">不支持</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout c-red">
+    <div class="t">为什么 gumphp 那条是决定性的</div>
+    它把「实况」当成<b>一等公民</b>写进了数据模型，<code>ImgInfo</code> 专门留了 <code>livePhotoUrl</code> 字段，
+    文档还写着支持 Douyin「image albums and Live Photos」。但在 <code>KuaiShou.php</code> 里：
+<pre style="margin:10px 0 0"><span class="k">foreach</span> ($atlasList <span class="k">as</span> $atlas) {
+    $imgInfo = <span class="k">new</span> ImgInfo(url: <span class="s">"https://{$atlasCdnList[0]}/{$atlas}"</span>);
+    <span class="c">//                                  ↑ 只传 url，livePhotoUrl 空着</span>
+    $images[] = $imgInfo;
+}</pre>
+    <b>模型留好了、字段留好了，快手这条链路就是不填。</b>只有一个解释：快手网页数据里没有这个东西可取。
+  </div>
+
+  <h3>4.2 一个不该被忽略的反证</h3>
+  <p>你的实测记录里有一句关键观察：单张实况的 <code>ext_params.single.volume = 1</code>。</p>
+  <div class="callout c-purple">
+    <div class="t">推理链</div>
+    <code>volume</code> 是音轨／音量语义。<b>一张静态 JPEG 不可能带音量。</b>
+    所以「实况的动效+声音」在平台侧<b>确实存在一条媒体流</b>，只是没有出现在你能抓到的那份 JSON 里。<br>
+    <b>结论：不是"没有"，而是"不在这个数据源里"。</b>这决定了补齐方向是<u>换数据源</u>，而不是换解析方式。
+  </div>
+
+  <h3>4.3 两种数据模型：先判定，再改代码</h3>
+  <p>这是最容易返工的地方。同样是"实况"，三个平台的编码方式完全不同：</p>
+
+  <div class="tblwrap">
+  <table>
+    <thead><tr><th>平台</th><th>实况编码方式</th><th>字段位置</th><th>模型</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>抖音</b></td>
+        <td>每张图各配一段短 mp4</td>
+        <td><code>images[i].video.play_addr.url_list[0]</code></td>
+        <td><span class="tag t-b">模型 B · 一图一段</span></td>
+      </tr>
+      <tr>
+        <td><b>微博</b></td>
+        <td>每张图各配一段</td>
+        <td><code>pics[i].videoSrc</code></td>
+        <td><span class="tag t-b">模型 B · 一图一段</span></td>
+      </tr>
+      <tr>
+        <td><b>小红书</b></td>
+        <td>同名文件配对</td>
+        <td><code>imageList[i].stream</code>（对象，键 EF4/EF5…）→ <code>NN.jpg</code> + <code>NN.mp4</code></td>
+        <td><span class="tag t-b">模型 B · 同名配对</span></td>
+      </tr>
+      <tr>
+        <td><b>快手</b></td>
+        <td><b>未知</b></td>
+        <td><code>atlas.list</code> 只有静态图</td>
+        <td><span class="tag t-a">待判定</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout c-amber">
+    <div class="t">两种可能的模型，改动量差一个数量级</div>
+    <p style="margin:0 0 8px"><b>模型 A · 整条一段</b>：一个 mp4 + N 张图。此时 <code>live</code> 的语义是"整条的动效地址"，
+    每张图都指向同一个 URL。改动 3 行，但要改 UI 的播放逻辑（不然 N 张图会播同一段）。</p>
+    <p style="margin:0"><b>模型 B · 一图一段</b>：N 个 mp4，与 <code>atlas.list</code> 按下标对齐。
+    改动 3 行，UI 逻辑与抖音完全一致，可直接复用。</p>
+  </div>
+
+  <h4>判定标准（写死，别靠"看起来成功"）</h4>
+  <div class="tblwrap">
+  <table>
+    <thead><tr><th>形态</th><th>通过标准</th><th>反向陷阱</th></tr></thead>
+    <tbody>
+      <tr><td>单张实况</td><td>1 图 + 1 mp4</td><td>—</td></tr>
+      <tr><td>实况合集（N 张）</td><td>N 图 + <b>N 个 mp4</b></td>
+        <td><b>只有 1 个 mp4 而图有 N 张</b> → 是模型 A，不是一图一段。必须用 <code>Σ时长 ≈ photo.duration</code> 交叉验证，
+        别把整条视频塞给每张图</td></tr>
+      <tr><td>混排（图 + 视频）</td><td>按 <code>kind</code> 分开，<code>live</code> 只挂 image</td><td>—</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>4.4 为什么微信小程序"可以"</h3>
+  <p>这是最容易被误导的一点。小程序能播快手实况，通常不是它更懂快手，而是：</p>
+  <ol>
+    <li><b>后端接了商业 SaaS 解析</b>——云析、极速通道这类都明确宣传覆盖"快手实况"，适配工作由服务商做了；</li>
+    <li><b>展示是伪实况</b>——封面图 + 叠一个 <code>&lt;video&gt;</code> 播放，用户感知不出来；</li>
+    <li><b>下载靠域名白名单</b>——小程序 <code>downloadFile</code> 要求合法域名，<code>short_videos</code> 仓库里就带了一份
+      <b>343 个域名</b>的 <code>download_whitelist.txt</code>。</li>
+  </ol>
+  <div class="callout c-blue">
+    <div class="t">所以"小程序能"≠"背后拿到了 Live Photo 的那对文件"</div>
+    对你有两条启示：① 用户对"伪实况"的接受度很高，L1 方案（静态图 + 叠层播放）性价比极高；
+    ② 如果确实要"真解析"，得往 App 接口方向走，不是抄小程序。
+  </div>
+
+  <h3>4.5 三条候选路径，按你的栈排序</h3>
+  <div class="tblwrap">
+  <table>
+    <thead><tr><th>优先级</th><th>路径</th><th>做法</th><th>成本</th><th>成功率预判</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>P1</b></td><td><b>同名前缀法</b></td>
+        <td>把 <code>atlas.list</code> 里 <code>xxx.jpg</code> 换成 <code>xxx.mp4</code> 直接 GET</td>
+        <td><span class="tag t-g">极低 · 10 行</span></td>
+        <td><span class="tag t-a">未知，但 30 秒可验</span></td>
+      </tr>
+      <tr>
+        <td><b>P2</b></td><td><b>App 接口 feedbyid</b></td>
+        <td><code>live_api/profile/feedbyid</code> + 游客 Cookie</td>
+        <td><span class="tag t-a">中</span></td>
+        <td><span class="tag t-g">最高</span> 依据：volume=1 证明媒体流存在，App 要播就得有这个地址</td>
+      </tr>
+      <tr>
+        <td>P3</td><td>PC APOLLO_STATE</td>
+        <td><code>/short-video/{pid}</code> 的 <code>VisionVideoDetailPhoto</code></td>
+        <td><span class="tag t-g">低</span></td>
+        <td><span class="tag t-r">低</span> PC 网页大概率也只渲染静态图</td>
+      </tr>
+      <tr>
+        <td>P4</td><td>WebView 拦截</td>
+        <td>用现成的 WebView 链路拦 XHR</td>
+        <td><span class="tag t-g">低（能力已有）</span></td>
+        <td><span class="tag t-r">很低</span> H5 只渲染静态图，就不会发 mp4 请求</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p style="font-size:13.5px;color:var(--ink2)">
+    P1 的依据：小红书就是同名配对（<code>NN.jpg</code> + <code>NN.mp4</code>），快手 CDN 路径结构相似，值得花 30 秒试一次。
+    P3/P4 我判断是白跑，顺手验证不亏。
+  </p>
+</section>
+
+<!-- ============ 5 ============ -->
+<section>
+  <h2><span class="num">5</span>自研现状对照</h2>
+  <p class="lead">以下全部来自对 <code>D:\Project\yt-dIp</code> 的只读审查，未改动任何文件。</p>
+
+  <h3>5.1 你的快手链路是干净的</h3>
+<pre><span class="c"># ytdlp_engine.py:474-618（注释摘录）</span>
+短链(移动UA) → v.m.chenzhongtech.com/fw/photo/{pid}
+            → &lt;script&gt; 内 SSR JSON（根 key 凯撒位移，按值定位）
+            → _ks_find_photo() 找同时含 photoId + photoType 的对象
+            → 4 个分支落库</pre>
+
+  <div class="tblwrap">
+  <table>
+    <thead><tr><th>形态</th><th><code>photoType</code></th><th>处理</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td>视频 / 橱窗视频</td><td><code>VIDEO</code></td><td><code>_ks_video_tiers</code>（manifest + qualityType 修正）</td><td><span class="tag t-g">完成</span></td></tr>
+      <tr><td>横向图集</td><td><code>HORIZONTAL_ATLAS</code></td><td><code>_ks_atlas_media</code></td><td><span class="tag t-g">完成（无动效）</span></td></tr>
+      <tr><td>长图图集</td><td><code>VERTICAL_ATLAS</code></td><td><code>_ks_atlas_media</code></td><td><span class="tag t-g">完成</span></td></tr>
+      <tr><td>单张图片</td><td><code>SINGLE_PICTURE</code></td><td>内联</td><td><span class="tag t-g">完成</span></td></tr>
+      <tr><td><b>单张实况</b></td><td><code>SINGLE_PICTURE</code> + <code>single.volume=1</code></td><td>内联</td><td><span class="tag t-a">只有静态图</span></td></tr>
+      <tr><td><b>实况合集</b></td><td><code>HORIZONTAL_ATLAS</code></td><td><code>_ks_atlas_media</code></td><td><span class="tag t-a">只有静态图</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="font-size:13.5px;color:var(--ink2)">
+    你在设计文档里明确写了「动效应在 App 内部接口（带签名）里，本期不做」，并保留了「该作品含动效，当前仅支持静态图」的诚实提示——
+    <b>这个产品判断是对的，不要为了"看起来支持"而回归掉它。</b>
+  </p>
+
+  <h3>5.2 缺口精确到一个空字符串</h3>
+  <div class="card">
+    <p style="margin:0 0 10px"><b>Python 侧（唯一的缺口）</b><br>
+    <code>ytdlp_engine.py:611-617</code></p>
+<pre><span class="c"># _ks_atlas_media()</span>
+media.append({
+    <span class="s">"url"</span>: f<span class="s">"https://{cdns[0]}{path}"</span>,
+    <span class="s">"width"</span>: ..., <span class="s">"height"</span>: ...,
+    <span class="s">"live"</span>: <span class="s">""</span>,        <span class="c"># ← 预留字段，一直是空串</span>
+    <span class="s">"kind"</span>: <span class="s">"image"</span>,
+})</pre>
+    <p style="margin:0"><code>SINGLE_PICTURE</code> 分支（2339-2345）同样有 <code>"live": ""</code>。</p>
+  </div>
+
+  <div class="card">
+    <p style="margin:0 0 10px"><b>Kotlin 侧（已全部就绪，一行都不用改）</b></p>
+    <div class="tblwrap" style="margin:0">
+    <table>
+      <thead><tr><th>位置</th><th>现状</th></tr></thead>
+      <tbody>
+        <tr><td><code>Engine.kt:317</code></td><td>已从 <code>media_json</code> 读 <code>live</code></td></tr>
+        <tr><td><code>Engine.kt:433-434</code></td><td><code>val live: String = ""  // 实况图的「动」那一段视频地址；普通图集为空串</code></td></tr>
+        <tr><td><code>Engine.kt:275/298</code></td><td><code>content_type</code> 枚举已含 <code>"live"</code>，<code>isGallery</code> 已包含</td></tr>
+        <tr><td><code>DouyinParser.kt:150-194</code></td><td>已实现 <code>live</code> 填充 + <code>liveCount == length</code> 判定</td></tr>
+        <tr><td><code>WeiboParser.kt:91-98</code></td><td>同上</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="callout c-green">
+    <div class="t">这是个好消息</div>
+    <b>补齐实况不需要动数据结构、不需要动前端、不需要动 Kotlin。</b>
+    抖音、微博早就填了，快手只是没填。整个缺口就是 <code>_ks_atlas_media()</code> 里那个空字符串——
+    前提是你先拿到动效地址（第 4.5 节）。
+  </div>
+
+  <h4>可以免费复用的判定口径</h4>
+  <p>你抖音那条的注释写得很到位，直接照搬到快手即可：</p>
+<pre><span class="c">// DouyinParser.kt:190-194</span>
+<span class="c">// 判定口径是「每一张都带动效地址」才叫实况图，不是「有一张带动效」。</span>
+<span class="c">// 否则普通图集里只要混进一张带动效的，就会被整条判成实况图（用户反馈的现象）</span>
+put(<span class="s">"content_type"</span>, <span class="k">if</span> (liveCount &gt; 0 &amp;&amp; liveCount == media.length()) <span class="s">"live"</span> <span class="k">else</span> <span class="s">"images"</span>)</pre>
+
+  <h3>5.3 技术栈约束（会直接影响方案选择）</h3>
+  <div class="tblwrap">
+  <table>
+    <thead><tr><th>约束</th><th>实情</th><th>影响</th></tr></thead>
+    <tbody>
+      <tr><td>Python 运行时</td><td>Chaquopy 嵌入，<code>site-packages</code> 仅 <code>attrs</code> / <code>retrying</code></td>
+        <td>请求只能用 stdlib <code>urllib</code></td></tr>
+      <tr><td>无 <code>requests</code></td><td>—</td><td>Cookie/会话管理要自己写</td></tr>
+      <tr><td>无 <code>curl_cffi</code></td><td>arm64 Android 无预编译轮子</td>
+        <td><b>TLS 指纹模拟做不到</b>，P2 只能硬试</td></tr>
+      <tr><td>内置 ffmpeg 9.0.2</td><td><code>android/.build-tmp/ffmpeg-9.0.2</code></td>
+        <td><span class="tag t-g">利好</span> 转 GIF、拼流、伪实况合成都能本地做</td></tr>
+      <tr><td>Windows 端未同步</td><td>—</td><td>MITM 嗅探方案只能先搁置</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>5.4 你在同类产品里的位置</h3>
+  <div class="tblwrap">
+  <table>
+    <thead><tr><th>能力</th><th>KS-Downloader</th><th>parse-video 系</th><th>res-downloader</th><th>你的项目</th></tr></thead>
+    <tbody>
+      <tr><td>单作品（零登录）</td><td>需 Cookie</td><td><span class="tag t-g">✅</span></td><td>代理嗅探</td><td><span class="tag t-g">✅</span></td></tr>
+      <tr><td>图集 / 长图</td><td><span class="tag t-g">✅</span></td><td><span class="tag t-g">✅</span></td><td><span class="tag t-g">✅</span></td><td><span class="tag t-g">✅</span></td></tr>
+      <tr><td>多档码率选择</td><td>—</td><td>单条</td><td>—</td><td><span class="tag t-g">✅ qualityType 修正</span></td></tr>
+      <tr><td>多平台统一模型</td><td>单平台</td><td><span class="tag t-g">✅</span></td><td><span class="tag t-g">✅</span></td><td><span class="tag t-g">✅ 抖音/小红书/微博/快手</span></td></tr>
+      <tr><td>实况图</td><td>❌</td><td>❌</td><td>❌</td><td><span class="tag t-a">抖音/微博/小红书 ✅，快手 ❌</span></td></tr>
+      <tr><td>断点续传 / 完整性</td><td><span class="tag t-g">✅</span></td><td>—</td><td><span class="tag t-g">✅</span></td><td>—</td></tr>
+      <tr><td>移动端原生</td><td><span class="tag t-n">TUI/Docker</span></td><td>Web</td><td>桌面</td><td><span class="tag t-g">Android 原生</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="font-size:13.5px;color:var(--ink2)">
+    客观说：在「快手 + 多平台 + 移动端」这个组合上，你的项目已经超过上面大部分开源实现。
+    唯一明显落后的是 KS-Downloader 的下载工程化（断点续传、文件完整性校验、已下载去重）。
+  </p>
+</section>
+
+<!-- ============ 6 ============ -->
+<section>
+  <h2><span class="num">6</span>补齐方案（含改动清单，未执行）</h2>
+  <p class="lead">以下代码仅为设计示意，<b>没有写入你的仓库</b>。</p>
+
+  <h3>6.1 最小改动三处</h3>
+
+  <h4>① 新增动效地址提取函数</h4>
+<pre><span class="k">def</span> <span class="f">_ks_live_urls</span>(photo: dict, count: int) -&gt; list[str]:
+    <span class="s">"""取实况动效地址，长度与图片数对齐。
+
+    两种模型都兼容：
+      模型 B（一图一段）→ 返回 N 条
+      模型 A（整条一段）→ 同一地址重复 N 次（UI 侧需配合去重播放）
+    取不到就返回空列表，调用方保持「仅静态图」的降级，不要报错。
+    """</span>
+    <span class="c"># P1：同名前缀法（最省事）</span>
+    <span class="c"># P2：App 接口 feedbyid 的 currentWork.ext_params</span>
+    ...
+    <span class="k">return</span> []</pre>
+
+  <h4>② <code>_ks_atlas_media()</code> 接受并填充</h4>
+<pre><span class="k">def</span> <span class="f">_ks_atlas_media</span>(photo: dict, live_urls: list[str] | <span class="k">None</span> = <span class="k">None</span>) -&gt; list[dict]:
+    live_urls = live_urls <span class="k">or</span> []
+    ...
+    media.append({
+        <span class="s">"url"</span>: f<span class="s">"https://{cdns[0]}{path}"</span>,
+        <span class="s">"width"</span>: ..., <span class="s">"height"</span>: ...,
+        <span class="s">"live"</span>: live_urls[i] <span class="k">if</span> i &lt; len(live_urls) <span class="k">else</span> <span class="s">""</span>,   <span class="c"># ← 就这一行</span>
+        <span class="s">"kind"</span>: <span class="s">"image"</span>,
+    })</pre>
+
+  <h4>③ <code>content_type</code> 判对（复用抖音口径）</h4>
+<pre><span class="c"># Engine._parse_kuaishou() 图集分支</span>
+live_n = sum(1 <span class="k">for</span> m <span class="k">in</span> media <span class="k">if</span> m[<span class="s">"live"</span>])
+ctype = <span class="s">"live"</span> <span class="k">if</span> live_n &gt; 0 <span class="k">and</span> live_n == len(media) <span class="k">else</span> <span class="s">"images"</span>
+...
+<span class="s">"content_type"</span>: ctype,        <span class="c"># 原来是写死的 "images"</span></pre>
+
+  <div class="callout c-amber">
+    <div class="t">三件事别忘</div>
+    ① <b>保留降级</b>：<code>live</code> 全空时仍输出「该作品含动效，当前仅支持静态图」，不要回归；<br>
+    ② <b>先判定模型再改</b>：模型 A/B 决定 <code>live</code> 的语义，顺序反了要返工；<br>
+    ③ <b>别为了"看起来支持"而强行填假地址</b>，宁可诚实降级。
+  </div>
+
+  <h3>6.2 万一 P1/P2 都不通：伪实况</h3>
+  <p>你已打包 ffmpeg 9.0.2，这三档都能本地做。注意<b>前置条件仍是先拿到那段 mp4</b>。</p>
+  <div class="tblwrap">
+  <table>
+    <thead><tr><th>档位</th><th>做法</th><th>用户感知</th><th>成本</th></tr></thead>
+    <tbody>
+      <tr><td><b>L1</b></td><td>静态图当封面 + <code>&lt;video&gt;</code> 叠层循环播放</td><td>几乎无差别</td><td><span class="tag t-g">纯 UI，最低</span></td></tr>
+      <tr><td><b>L2</b></td><td>mp4 → GIF（<code>ffmpeg -vf fps=12</code>），实现"保存成动图"</td><td>"能存动图"</td><td><span class="tag t-g">低</span></td></tr>
+      <tr><td><b>L3</b></td><td>真·Live Photo：HEIC/JPG + MOV 双写 <code>ContentIdentifier</code></td>
+        <td>存进相册真的是实况</td><td><span class="tag t-r">高</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="font-size:13.5px;color:var(--ink2)">
+    L3 的技术门槛：HEIC 要写 Apple Makernote tag <code>0x0011</code>，MOV 要写 QuickTime
+    <code>com.apple.quicktime.content.identifier</code>，<b>两端必须是同一个 UUID</b>。
+    安卓各厂商动图格式还不统一（小米/OPPO 各异），不建议优先做。
+  </p>
+
+  <h3>6.3 顺带值得抄的两个工程细节</h3>
+  <div class="card tight">
+    <p style="margin:0 0 8px"><b>① 文件类型嗅探代替扩展名猜测</b>（来自 KS-Downloader）<br>
+    快手 CDN 地址常无后缀或后缀与实际编码不符。用文件头 magic number 判类型（mp4/m4v/mkv/flv/webp/avif），比猜后缀可靠。</p>
+    <p style="margin:0"><b>② 按平台给 Referer</b>（你自己在微博上踩过的坑）<br>
+    <code>*.sinaimg.cn</code> 防盗链只认平台自己的 Referer，带别人的会被拒。同一个道理适用于快手 CDN——
+    <b>下载与预览都要带上 <code>https://www.kuaishou.com/</code></b>。你的 <code>DIRECT_URL_HOSTS</code> 已经加了 <code>ndcimgs.com</code> / <code>kwimgs.com</code>，值得确认 Referer 也一起给了。</p>
+  </div>
+</section>
+
+<!-- ============ 7 ============ -->
+<section>
+  <h2><span class="num">7</span>十一个坑</h2>
+  <p class="lead">全是从别人源码注释、你踩过的记录里捞出来的，比架构更值钱。</p>
+  <div class="steps">
+    <div class="step"><h4>短链跳转次数不固定</h4><p><code>v.kuaishou.com/{code}</code> 可能 1–3 跳，且<b>落点由 UA 决定</b>：桌面 UA 落到 JS 壳页（零数据），移动 UA 才落到 SSR 页。你的代码已经处理了这条。</p></div>
+    <div class="step"><h4>长视频路由结构不同</h4><p><code>/fw/long-video/</code> 必须改写为 <code>/fw/photo/</code>，或单独走 <code>manifestH265.json.adaptationSet[].representation[].backupUrl</code>。</p></div>
+    <div class="step"><h4>JSON 里嵌了非法片段</h4><p>畸形字符串化数据、匿名函数、尾逗号。先 <code>json.loads</code>，失败再清洗或括号配对截取。</p></div>
+    <div class="step"><h4>顶层 key 被位移混淆</h4><p><code>tusjoh</code> = <code>string</code> +1。别按 key 取，深度遍历找特征节点。</p></div>
+    <div class="step"><h4>图集 CDN 域名会变</h4><p>别硬编码 <code>tx2.a.yximgs.com</code>，从 <code>atlas.cdn[0]</code> / <code>cdnList</code> 动态取，硬编码只作最后兜底。</p></div>
+    <div class="step"><h4>直链有防盗链</h4><p>CDN 校验 Referer + UA，浏览器直接 <code>&lt;video src&gt;</code> 会 403。要服务端/本地代理并透传 <code>Range</code>。</p></div>
+    <div class="step"><h4>直链有时效</h4><p>别把直链当长期资产缓存。缓存「解析结果 + 短 TTL」，不缓存 URL 本身。</p></div>
+    <div class="step"><h4><code>result</code> 语义要分清</h4><p><code>1</code> 成功 / <code>2</code> 风控（指数退避 <code>5·2ⁿ</code>）/ <code>50</code> 缺签名。不区分会把"被限流"误判成"内容不存在"。</p></div>
+    <div class="step"><h4>扩展名不可信</h4><p>用 magic number 嗅探。你的图集下载产物是「真 JPEG（<code>ff d8 ff e1</code> + Exif）」，这个校验方式是对的，可以推广到视频。</p></div>
+    <div class="step"><h4>竖屏的 height 是长边</h4><p>1080×1920 若按 <code>height</code> 当档位会显示成 1920p。你已修（优先读 <code>qualityType</code>），这是很多项目没做的细节。</p></div>
+    <div class="step"><h4>并发与限速</h4><p>成熟项目都有内置延时（KS-Downloader 抽了 <code>tools/sleep.py</code>），下载并发默认 4。别把解析做成无脑并发。</p></div>
+  </div>
+</section>
+
+<!-- ============ 8 ============ -->
+<section>
+  <h2><span class="num">8</span>合规边界</h2>
+  <p class="lead">技术可行 ≠ 产品可做。这一节会直接影响你的功能取舍。</p>
+
+  <div class="callout c-red">
+    <div class="t">三条最硬的红线</div>
+    <p style="margin:0 0 8px"><b>① 去水印 / 绕过技术措施。</b>快手作品直链本身多为作者上传的原始文件，所以"无水印"对快手而言常是自然结果而非破解。
+    但<b>主动去除平台叠加标识、或破解付费/私密内容</b>，在《著作权法》技术措施条款与《反不正当竞争法》下风险显著。</p>
+    <p style="margin:0 0 8px"><b>② 批量采集与再分发。</b>单条链接的用户主动解析，与"按作者/关键词批量抓取并建库分发"，性质完全不同。后者需要明确授权基础。</p>
+    <p style="margin:0"><b>③ 平台协议。</b>未经许可的自动化访问通常违反用户协议，平台可封禁、限流、主张民事权利。这是商业风险，不是技术风险。</p>
+  </div>
+
+  <h3>把它做成产品能力，而不是法务文书</h3>
+  <ul>
+    <li><b>定位为「个人备份 / 已授权素材提取」</b>，不做「全网采集库」。文案、功能、默认参数要一致。</li>
+    <li><b>不做批量入口</b>（主页批量、关键词搜索）——顺带绕开了 <code>__NS_hxfalcon</code> 这个最大技术债。</li>
+    <li><b>私有内容一律明确不支持</b>：私密作品、付费内容、需登录可见的，返回「不支持」而非「解析失败」。这既是合规也是产品诚实度。</li>
+    <li><b>保留删除通道</b>：权利人可申请移除；日志不长期留存作品元数据。</li>
+    <li><b>署名与来源</b>：解析结果尽量保留作者信息（你已有 <code>uploader</code> / <code>uploader_id</code>），便于用户溯源与合规使用。</li>
+    <li><b>许可证</b>：借鉴 GPL-3.0 项目（KS-Downloader）只取思路；要复用代码就选 Apache-2.0 / MIT 的。</li>
+  </ul>
+</section>
+
+<!-- ============ 9 ============ -->
+<section>
+  <h2><span class="num">9</span>落地路线</h2>
+  <p class="lead">针对你项目现状的三段式，时间按「有连续投入」估。</p>
+
+  <div class="tblwrap">
+  <table>
+    <thead><tr><th style="width:86px">阶段</th><th>做什么</th><th>判据</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>30 分钟</b><br><span style="color:var(--ink3);font-size:12px">取证</span></td>
+        <td>跑 <code>_ks_live_probe.py</code>（在本机终端，不在沙箱）：<br>
+          ① 平行数组检测 ② 同名前缀 HEAD 探测 ③ PC 页 ④ App 接口（可选 Cookie）</td>
+        <td>输出 <code>_ks_live_dump.json</code>；判定是模型 A 还是 B</td>
+      </tr>
+      <tr>
+        <td><b>半天</b><br><span style="color:var(--ink3);font-size:12px">P1</span></td>
+        <td>若第 4 段有 <code>200 + video/*</code>：改 <code>_ks_atlas_media</code> 10 行 + <code>content_type</code> 判定</td>
+        <td>实况合集 N 图 + N mp4；界面出现「实况」角标</td>
+      </tr>
+      <tr>
+        <td><b>1–3 天</b><br><span style="color:var(--ink3);font-size:12px">P2</span></td>
+        <td>若 P1 不通：<code>feedbyid</code> + 游客 Cookie + 完整头；先试标准 TLS，不行再评估是否值得引 curl_cffi（要自己编 arm64 轮子）</td>
+        <td>同上；且失败时能稳定降级，不影响现有图集解析</td>
+      </tr>
+      <tr>
+        <td><b>可选</b><br><span style="color:var(--ink3);font-size:12px">兜底</span></td>
+        <td>L1 伪实况（静态图 + 叠层播放）→ L2 转 GIF 导出</td>
+        <td>用户侧感知为「动图可播」，不需要真封装</td>
+      </tr>
+      <tr>
+        <td><b>顺手</b><br><span style="color:var(--ink3);font-size:12px">工程化</span></td>
+        <td>抄 KS-Downloader：magic number 嗅探、断点续传 <code>Range</code>、已下载去重（<code>photoId</code> 主键）</td>
+        <td>大文件下载失败可续、重复解析不重复下载</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============ 10 ============ -->
+<section>
+  <h2><span class="num">10</span>参考清单</h2>
+  <p class="lead">按对本报告的信息贡献度排序。建议精读前三个。</p>
+  <div class="card">
+    <div class="repo"><div class="nm">JoeanAmier/KS-Downloader</div><div class="ds">工程质量最高。看 <code>source/request/template.py</code>（请求封装/重试/<code>result</code> 语义）与 <code>source/downloader/</code>（断点续传、文件完整性、magic number）。<b>GPL-3.0 注意。</b></div></div>
+    <div class="repo"><div class="nm">wujunwei928/parse-video</div><div class="ds">看 <code>parser/kuaishou.go</code>。重定向策略与 <code>long-video→photo</code> 改写是全文最实用的两段。</div></div>
+    <div class="repo"><div class="nm">gumphp/video-parse</div><div class="ds">看 <code>src/Parser/KuaiShou.php</code> 与 <code>src/Model/ImgInfo.php</code>。<b>实况字段留了不填</b>，是本报告最关键的证据。</div></div>
+    <div class="repo"><div class="nm">CharlesPikachu/videodl</div><div class="ds">看 <code>modules/sources/kuaishou.py</code>。DASH 多码率排序（codec→码率→分辨率）的逻辑可直接借鉴。</div></div>
+    <div class="repo"><div class="nm">jiuhunwl/short_videos</div><div class="ds">看 <code>api/kuaishou/KuaishouSpider.php</code>。双状态兜底 + 图集/BGM 提取，MIT 许可。</div></div>
+    <div class="repo"><div class="nm">nbwzlyd/media-parser</div><div class="ds">看 <code>src/parsers/kuaishou_parser.py</code>。多路由降级、括号配对截取、<code>atlas</code> 变体选择，最"生产级"的一份。</div></div>
+    <div class="repo"><div class="nm">putyy/res-downloader</div><div class="ds">看 <code>core/rule.go</code> + <code>core/proxy.go</code>。桌面端嗅探必读；规则化 MITM 白名单设计很干净。</div></div>
+    <div class="repo"><div class="nm">NanmiCoder/MediaCrawler</div><div class="ds">看 <code>media_platform/kuaishou/client.py</code>。<code>__NS_hxfalcon</code>、<code>result:2/50</code>、<code>pcursor</code> 分页的权威说明。</div></div>
+  </div>
+  <p style="margin-top:18px;font-size:13.5px;color:var(--ink2)">
+    本报告只做技术方案分析，不提供可直接运行的解析代码。落地时请自行核对各仓库许可证，并遵守第 8 章的合规边界。
+  </p>
+</section>
+
+<footer>
+  <p>v2 · 2026-10-22 · 数据来源：GitHub 仓库源码与 README（逐文件阅读）、自研项目只读审查、社区逆向分析文章 · 星标与提交时间为检索时快照</p>
+  <p>自研项目部分的内容均为只读审查所得，未对 <code>D:\Project\yt-dIp</code> 做任何修改。沙箱出口代理拦截快手全系域名（HTTP 405），故快手侧实测由本地探测脚本完成。</p>
+</footer>
+
+</div>
+</body>
+</html>

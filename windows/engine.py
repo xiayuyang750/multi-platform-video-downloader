@@ -26,7 +26,7 @@ DB_FILE = DATA_DIR / "history.db"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 
 # 解析超时（秒）。境外站点在 VPN 未开时会一直重试到超时
-PARSE_TIMEOUT = 75
+PARSE_TIMEOUT = 30
 
 PROGRESS_MARK = "__PROG__"
 DONE_MARK = "__DONE__"

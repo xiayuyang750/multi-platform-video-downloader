@@ -63,6 +63,8 @@ object WeiboParser {
                 put("id", shareUrl.hashCode().toString())
                 put("source_url", shareUrl)
                 put("title", title.ifBlank { "微博头条文章" }.take(120))
+                // 文章正文（ARTICLE_JS 从内容容器取到的纯文本）
+                put("description", art.optString("content"))
                 put("uploader", "")
                 put("uploader_id", "")
                 put("thumbnail", media.optJSONObject(0)?.optString("url") ?: "")
@@ -119,7 +121,7 @@ object WeiboParser {
             // 是 HTML 转义后的字符串，但 URL 本身是明文，直接正则即可。
             videoLinkInText(status.optString("text"))?.let { return WeiboDetail.Redirect(it) }
 
-            val text = status.optString("text").replace(Regex("<[^>]+>"), "").trim()
+            val text = plainText(status.optString("text"))
             return WeiboDetail.Unavailable(
                 if (text.isBlank())
                     "这条微博里没有可下载的图片或视频。"
@@ -129,11 +131,13 @@ object WeiboParser {
         }
 
         val user = status.optJSONObject("user") ?: JSONObject()
-        val text = status.optString("text").replace(Regex("<[^>]+>"), "").trim()
+        val text = plainText(status.optString("text"))
         val payload = JSONObject().apply {
             put("id", status.optString("id"))
             put("source_url", shareUrl)
             put("title", text.lineSequence().firstOrNull().orEmpty().take(120))
+            // 标题只取首行 120 字，正文保留全文（HTML 标签在上一步已剥掉）
+            put("description", text)
             put("uploader", user.optString("name"))
             put("uploader_id", user.optString("id"))
             put("thumbnail", cover)
@@ -160,6 +164,15 @@ object WeiboParser {
         val fid = VIDEO_LINK.find(text)?.groupValues?.getOrNull(1) ?: return null
         return "https://video.weibo.com/show?fid=$fid"
     }
+
+    /**
+     * 微博正文是 HTML 片段。`<br>` 必须先换成换行再剥标签 ——
+     * 直接整段删标签会把多行正文粘成一行，标题和正文都会变成一坨。
+     */
+    private fun plainText(html: String): String =
+        html.replace(Regex("(?i)<br\\s*/?>"), "\n")
+            .replace(Regex("<[^>]+>"), "")
+            .trim()
 
     /** 回传「需要再解析一次」的 URL 时用的 payload 字段名（解析页与 ViewModel 共用）。 */
     const val PAYLOAD_REDIRECT = "redirect_url"

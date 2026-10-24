@@ -136,6 +136,8 @@ object PlatformColor {
     // 微信绿与视频号橙：官方品牌色
     val wechat = Color(0xFF07C160)
     val channels = Color(0xFFFA9D3B)
+    // 快手品牌橙
+    val kuaishou = Color(0xFFFF4906)
     val other = Color(0xFF6B7280)
 
     /** 按平台名取色。名字来自 engine 的 detect_platform。 */
@@ -150,6 +152,7 @@ object PlatformColor {
         "微博" -> weibo
         "微信公众号" -> wechat
         "微信视频号" -> channels
+        "快手" -> kuaishou
         else -> other
     }
 
@@ -165,6 +168,7 @@ object PlatformColor {
         "微博" -> "微"
         "微信公众号" -> "公"
         "微信视频号" -> "视"
+        "快手" -> "快"
         else -> "其"
     }
 }

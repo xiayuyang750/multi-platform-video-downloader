@@ -9,9 +9,11 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -28,13 +30,14 @@ import java.net.URL
  *
  * 为什么必须用 WebView：抖音的接口要求 a_bogus 签名和登录态，纯 HTTP 客户端
  * 两样都拿不到，所以 yt-dlp 必然 403。而 WebView 本身就是浏览器，它会自己
- * 完成签名。我们只需要拦下它发出的两类请求，把响应体读出来：
+ * 完成签名。取数据有三条路，按优先级：
  *
- *   ① `/aweme/v1/web/aweme/detail/` —— 视频类作品的数据**本应**在这里，
- *      但真机实测拿不到：抖音把无头 WebView 判成可疑环境并弹验证码，这条接口
- *      对本应用一律回 HTTP 200 + **空响应体**。所以视频类作品走这条兜底链路
- *      只能等超时如实报错（详见 shouldInterceptRequest 里的说明）。
- *   ② 页面主文档 —— 图文 / 图集 / 实况图的数据服务端直出在里面，这条是**可用**的。
+ *   ① **钩子**（优先）：HOOK_JS 包住页面自己的 fetch / XHR，详情接口的响应体
+ *      通过 JS bridge 直接回传（Bridge.onHookResponse）。请求由页面亲自发出，
+ *      签名、Cookie、登录态全是真的，因此不受「重放被风控回空」影响。
+ *   ② **重放**（兜底）：shouldInterceptRequest 只拿得到请求，就用原生 HTTP
+ *      把同一条请求再发一次。历史上经常回 HTTP 200 + 空响应体，只作 ① 的备份。
+ *   ③ **主文档**：图文 / 图集 / 实况图的数据是服务端直出在页面里的，这条一直可用。
  *
  * 与 Windows 端的区别：Windows 端用 DrissionPage 驱动本机浏览器、监听响应；
  * 安卓上没这个库，换成 WebView 的 shouldInterceptRequest。Windows 端还多一条
@@ -72,6 +75,25 @@ class DouyinActivity : Activity() {
     /** 待解析的分享链接。桥方法在别的线程上也要用它，所以存成字段而不是局部变量。 */
     private var shareUrl = ""
 
+    /**
+     * 作品页是否**加载完成**过。
+     *
+     * 超时时要靠它区分两种完全不同的原因：
+     *   页面加载完成 → 网络没问题，是平台不给数据；
+     *   页面没加载完 → 就是网络/加载失败。
+     * 不记这个就只能把两种可能一起写进提示里，等于什么都没说。
+     */
+    @Volatile
+    private var pageLoaded = false
+
+    /** 是否收到过详情接口的**空响应体**（抖音对限流作品的既有行为）。 */
+    @Volatile
+    private var emptyDetail = false
+
+    /** 空响应体连续出现几次。达到阈值就可以直接给结论，不必空等超时。 */
+    @Volatile
+    private var emptyDetailCount = 0
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -100,6 +122,11 @@ class DouyinActivity : Activity() {
             // 实测：不加限制时本应用确实创建了 AudioTrack。
             // 要求「用户手势」才允许播放，从源头掐掉自动播放。
             settings.mediaPlaybackRequiresUserGesture = true
+            // 优先路径的数据入口：页面自己的 fetch / XHR 拿到响应体后，通过这个
+            // 桥回传过来（见 HOOK_JS / onHookResponse）。它比 shouldInterceptRequest
+            // 更可靠 —— 后者只能拿到请求，响应体得用原生 HTTP 重放一次，
+            // 而重放带着「不是页面自己发的」痕迹，容易被风控回空。
+            addJavascriptInterface(Bridge(), BRIDGE_NAME)
             webViewClient = object : WebViewClient() {
                 /**
                  * 尽量早地注入「静音」补丁。
@@ -114,17 +141,33 @@ class DouyinActivity : Activity() {
                  */
                 override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                     super.onPageStarted(view, url, favicon)
+                    Log.i(TAG, "page started: $url")
+                    // 作品已不存在时，抖音不是回错误页，而是把请求**重定向到精选推荐流**，
+                    // 地址上带着 `previous_page=web_video_404_link` 这个标记
+                    // （实测 7693090141682334373）。此时详情接口对页面自己也回空响应体，
+                    // 再等下去只会熬满 15 秒；看到标记就直接给结论。
+                    if (url.contains("web_video_404_link")) {
+                        Log.i(TAG, "video 404, abort early")
+                        deliver(null, "这条作品已被作者删除，或已设为私密作品。")
+                        return
+                    }
                     // 短链跳转后的地址里就带着作品编号（实测 v.douyin.com 会 302 到
                     // www.douyin.com/video/<id>）。趁早记下来，后面拦到响应时用它
                     // 判断「这条数据是不是我要的那条」。
                     videoIdFrom(url)?.let { expectedId = it }
                     view.evaluateJavascript(SILENCE_JS, null)
+                    // 钩子必须在页面脚本之前装好，否则页面那次详情请求已经发完了。
+                    view.evaluateJavascript(HOOK_JS, null)
                 }
 
                 /** 页面加载完再做一次兜底：把已存在的媒体全部暂停并静音。 */
                 override fun onPageFinished(view: WebView, url: String) {
                     super.onPageFinished(view, url)
+                    Log.i(TAG, "page finished: $url")
+                    if (videoIdFrom(url) != null) pageLoaded = true
                     view.evaluateJavascript(SILENCE_JS, null)
+                    // 有些站内跳转不重新触发 onPageStarted，重复装一次更稳（JS 侧有幂等判断）
+                    view.evaluateJavascript(HOOK_JS, null)
                 }
                 override fun shouldInterceptRequest(
                     view: WebView,
@@ -148,21 +191,23 @@ class DouyinActivity : Activity() {
                     // ① 详情接口 —— 视频类作品的数据本应在这里。
                     //
                     //    视频页的主文档实测只是个 JS 虚拟机壳（72914 字节、零数据），
-                    //    真正的数据由页面脚本算好签名后再请求这条接口取回，所以这里
-                    //    拦的是**正确**的目标。
+                    //    真正的数据由页面脚本算好签名后再请求这条接口取回。
                     //
-                    //    但真机实测：抖音把无头 WebView 判成可疑环境并弹了验证码，
-                    //    这条接口对本应用一律回 **HTTP 200 + 空响应体**（页面自己
-                    //    发的请求也一样，实测连「钩住页面 fetch/XHR 回传响应体」都
-                    //    只能拿到 len=0）。也就是说视频类作品在兜底链路上**拿不到
-                    //    数据**，只能等超时如实报错 —— 这是抖音风控的结果，不是本页
-                    //    的缺陷。这条分支留着是因为它本来就是对的目标，且开销极小
-                    //    （一次请求），风控哪天松了它就能直接生效。
+                    //    取响应体有两条路，这里用的是第二条：
+                    //      a) **优先**：HOOK_JS 钩住页面自己的 fetch/XHR，直接把响应体
+                    //         通过 Bridge 回传（见 onHookResponse）。请求由页面亲自发出，
+                    //         签名和登录态都是真的。
+                    //      b) 兜底：本分支用原生 HTTP 把这条请求**重放**一次拿响应体。
+                    //         历史上这条路经常回 **HTTP 200 + 空响应体**（抖音把无头
+                    //         WebView 判成可疑环境），所以它只作为 a 的备份，不再承担
+                    //         主责。
                     //
                     //    图文 / 图集 / 实况图不受影响：它们的数据是服务端直出在主
                     //    文档里的，走下面第 ② 条。
                     if (url.contains(DouyinParser.DETAIL_API)) {
-                        val body = fetchBody(url, request.requestHeaders) ?: return null
+                        val body = fetchBody(url, request.requestHeaders)
+                        Log.i(TAG, "detail via replay: len=${body?.length ?: -1}")
+                        if (body == null) return null
                         val r = DouyinParser.parseDetail(body, shareUrl, expectedId)
                         when (r) {
                             is DouyinDetail.Video -> deliver(r.payload.toString())
@@ -185,7 +230,14 @@ class DouyinActivity : Activity() {
                     val body = fetchBody(url, request.requestHeaders) ?: return null
                     val payload = DouyinParser.parseMainDocument(
                         body, shareUrl, videoIdFrom(url).orEmpty(),
-                    ) ?: return null
+                    )
+                    Log.i(
+                        TAG,
+                        "main doc: len=${body.length} images=" + body.contains("images") +
+                            " playAddr=" + body.contains("playAddr") +
+                            " parsed=" + (payload != null),
+                    )
+                    if (payload == null) return null
                     deliver(payload.toString())
                     // 返回 null：让 WebView 用它自己那份响应，页面行为不受影响
                     return null
@@ -207,24 +259,16 @@ class DouyinActivity : Activity() {
         // 标成不可触摸，事件就穿透到底下的解析页，等待期间用户仍能正常操作。
         window.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
 
-        // 超时兜底。上限取 15 秒（用户定的）：走这条链路本来就是「主链路没拿到
-        // 数据」，正常几秒内就该有结果，再久基本等于这条作品拿不到，与其让人
-        // 干等，不如早点如实说明。
+        // 超时兜底。上限取 12 秒：走这条链路本来就是「主链路没拿到数据」，
+        // 实测正常几秒内就该有结果；剩下能判的（404 / 空详情）都已提前给结论，
+        // 再久基本等于这条作品拿不到，不如早点如实说明。
         //
         // 必须挂在主线程 Handler 上，**不能**写成 view.postDelayed：这个 WebView
         // 从来没被挂进视图树（加载页面不需要窗口），而未 attached 的 View 会把
         // post 进去的动作塞进 RunQueue，等它 attach 才执行 —— 永远等不到。
         // 实测就是这么卡住的：解析页一直停在自己的转圈状态，既不报错也不结束。
         Handler(Looper.getMainLooper()).postDelayed({
-            if (!delivered) {
-                deliver(
-                    null,
-                    "15 秒内没能取到这条作品的数据。常见原因：\n" +
-                        "① 作品已被删除，或被作者设为「仅自己可见」—— 这种情况谁都解析不了；\n" +
-                        "② 网络较慢，页面这次没正常加载 —— 重试一次通常就好。\n" +
-                        "如果反复失败，欢迎用「意见反馈」把这条链接告诉我们。"
-                )
-            }
+            if (!delivered) deliver(null, timeoutReason())
         }, TIMEOUT_MS)
     }
 
@@ -309,6 +353,87 @@ class DouyinActivity : Activity() {
         text
     }.getOrNull()
 
+    /** 从详情接口地址的查询串里取 `aweme_id`（页面还没跳转完时它比 expectedId 可靠）。 */
+    private fun awemeIdFrom(url: String): String =
+        Regex("aweme_id=(\\d+)").find(url)?.groupValues?.getOrNull(1).orEmpty()
+
+    /**
+     * 超时的确切原因。
+     *
+     * 三条判据都来自本项目的真实观测，不是穷举可能性：
+     *   ① 页面根本没加载完 → 网络/加载失败。此时连页面都打不开，谈不上平台给不给数据。
+     *   ② 页面加载完成，且**页面自己**请求详情接口拿到空响应体 → 平台不开放这条作品的数据。
+     *      被限流的作品正是这样：页面能打开、App 里能看，但接口对任何人回空。
+     *   ③ 页面加载完成，但详情接口一次都没被请求 → 页面结构变了（罕见），需要更新解析。
+     */
+    private fun timeoutReason(): String = when {
+        !pageLoaded ->
+            "页面没能加载完成，请检查网络后重试。"
+        emptyDetail ->
+            "抖音没有开放这条作品的公开数据（这类作品通常处于限流状态），只能在抖音 App 内观看。"
+        else ->
+            "页面已加载，但没发出可用的作品数据请求 —— 可能是抖音改版，欢迎用「意见反馈」告诉我们。"
+    }
+
+    /**
+     * 页面内 fetch / XHR 的响应回调（JS 侧见 [HOOK_JS]）。
+     *
+     * 这是抖音兜底链路的**优先路径**：详情请求由页面自己带着签名和登录态发出，
+     * 我们只是旁听它拿回来的响应体 —— 不新增任何凭据、不需要我们另外登录，
+     * 也就没有「原生 HTTP 重放被风控回空」的问题。
+     *
+     * 作品编号做双保险：优先用页面地址里的 [expectedId]；地址还没跳转完时退回
+     * 从请求 URL 的 `aweme_id=` 取。两者都拿不到就丢弃 —— 宁可继续等，
+     * 也不把推荐位里别人的作品当结果交出去（那会造成「伪成功」）。
+     */
+    inner class Bridge {
+        /**
+         * 诊断用：页面每发一个 XHR/fetch 就报一次 URL（不带响应体）。
+         *
+         * 加它是为了回答「钩子到底有没有装上、页面的详情请求走不走 XHR」——
+         * 只靠「没收到详情响应」分不清是钩子没生效还是页面根本没发这个请求。
+         */
+        @JavascriptInterface
+        fun onHookSeen(url: String) {
+            // 只记抖音的业务接口：页面的埋点、扩展图标、静态资源占绝大多数，
+            // 全记下来会把日志冲满，反而看不到真正想看的请求。
+            if (!url.contains("/aweme/")) return
+            Log.i(TAG, "hook seen: ${url.take(110)}")
+        }
+
+        @JavascriptInterface
+        fun onHookResponse(url: String, body: String) {
+            if (delivered) return
+            if (!url.contains(DouyinParser.DETAIL_API)) return
+            Log.i(TAG, "hook detail: len=${body.length} url=${url.take(120)}")
+            // 空响应体是抖音对可疑环境的既有行为（历史实测），直接放弃这一份
+            if (body.length < 200) {
+                emptyDetail = true
+                emptyDetailCount += 1
+                // 页面已经渲染完，接口又连续回空 —— 结论已经明确，没有继续等的理由。
+                // 取 2 次是为了躲掉「第一次请求赶在 Cookie/环境就绪之前」的偶发情况。
+                if (pageLoaded && emptyDetailCount >= 2) {
+                    Log.i(TAG, "detail empty x$emptyDetailCount after load, abort early")
+                    deliver(null, timeoutReason())
+                }
+                return
+            }
+            val id = expectedId.ifBlank { awemeIdFrom(url) }
+            // 两个来源都拿不到作品编号就丢弃：宁可等超时，也不盲收别人的作品
+            if (id.isBlank()) {
+                Log.i(TAG, "hook detail: no aweme id, dropped")
+                return
+            }
+            val r = runCatching { DouyinParser.parseDetail(body, shareUrl, id) }
+                .getOrNull() ?: return
+            when (r) {
+                is DouyinDetail.Video -> deliver(r.payload.toString())
+                is DouyinDetail.Unavailable -> deliver(null, r.message)
+                DouyinDetail.None -> Unit
+            }
+        }
+    }
+
     /** 把结果交回调用方并关闭。payload 为 null 表示失败。 */
     private fun deliver(payload: String?, reason: String = "") {
         if (delivered) return
@@ -330,7 +455,85 @@ class DouyinActivity : Activity() {
         const val EXTRA_PAYLOAD = "payload"
         const val EXTRA_REASON = "reason"
 
-        private const val TIMEOUT_MS = 15_000L
+        private const val TIMEOUT_MS = 12_000L
+
+        private const val TAG = "ytdy"
+
+        /** JS 桥的全局对象名，与 [HOOK_JS] 里 `window.__ytBridge` 对应。 */
+        private const val BRIDGE_NAME = "__ytBridge"
+
+        /**
+         * 钩住页面自己的 `fetch` 与 `XMLHttpRequest`，把**详情接口**的响应体回传原生。
+         *
+         * 为什么只挑详情接口：页面还会拉推荐流、静态资源，那些响应又大又没用；
+         * 按「URL 含 `aweme/detail` 或响应体里有 `aweme_detail`」过滤，噪音趋近于零。
+         *
+         * 为什么用 `clone()`：fetch 的响应体是一次性流，直接 `.text()` 会把它吃掉，
+         * 页面自己就读不到了（页面会白屏）。复制一份读，页面行为完全不受影响。
+         *
+         * 全部包在 try 里：钩子本身绝不能让页面报错。
+         * `window.__ytHook` 做幂等 —— onPageStarted 与 onPageFinished 都会注入。
+         */
+        private const val HOOK_JS = """
+(function(){
+  try{
+    if (window.__ytHook) return;
+    window.__ytHook = 1;
+    function seen(u){
+      try{
+        if (!u) return;
+        window.__ytBridge.onHookSeen(String(u));
+      }catch(e){}
+    }
+    function emit(u, t){
+      try{
+        var s = (typeof t === 'string') ? t : '';
+        var uu = String(u || '');
+        // 空响应也要往上报：否则「钩子没拿到响应体」和「钩子根本没被调用」
+        // 在日志里长得一模一样，没法定位。
+        if (uu.indexOf('aweme/detail') < 0 && s.indexOf('aweme_detail') < 0) return;
+        window.__ytBridge.onHookResponse(uu, s);
+      }catch(e){}
+    }
+    try{
+      var open = XMLHttpRequest.prototype.open;
+      var send = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function(m, u){
+        try{ this.__ytUrl = u; seen(u); }catch(e){}
+        return open.apply(this, arguments);
+      };
+      XMLHttpRequest.prototype.send = function(){
+        var x = this;
+        try{
+          x.addEventListener('load', function(){
+            try{
+              var rt = x.responseType;
+              if (rt === '' || rt === 'text') emit(x.__ytUrl, x.responseText);
+              else if (rt === 'json' && x.response) emit(x.__ytUrl, JSON.stringify(x.response));
+            }catch(e){}
+          });
+        }catch(e){}
+        return send.apply(this, arguments);
+      };
+    }catch(e){}
+    try{
+      var f = window.fetch;
+      if (f) {
+        window.fetch = function(input, init){
+          var u = (typeof input === 'string') ? input : ((input && input.url) || '');
+          seen(u);
+          return f.apply(this, arguments).then(function(r){
+            try{
+              r.clone().text().then(function(t){ emit(u, t); }).catch(function(){});
+            }catch(e){}
+            return r;
+          });
+        };
+      }
+    }catch(e){}
+  }catch(e){}
+})();
+"""
 
         /**
          * 注入页面的「静音补丁」。

@@ -27,8 +27,15 @@ object Engine {
 
     private const val TAG = "Engine"
 
-    /** 解析超时。与 Windows 端对齐（engine.py 的 PARSE_TIMEOUT）。 */
-    const val TIMEOUT_MS = 75_000L
+    /**
+     * 解析超时（外层兜底）。与 Windows 端 `engine.py` 的 PARSE_TIMEOUT 保持一致。
+     *
+     * 取 30 秒而不是更短，是因为 YouTube 这类平台要解 JS 挑战（n-sig），
+     * 正常也可能用掉 8~15 秒；压到 12 秒会把能解析的作品误判成失败。
+     * 国内平台不用等这么久：各自有自己的失败判据（抖音 12 s、小红书 6.4 s、
+     * 微博 5.6 s、快手 1~2 s），这个 30 秒只是最后一道保险。
+     */
+    const val TIMEOUT_MS = 30_000L
 
     @Volatile
     private var module: PyObject? = null
@@ -248,8 +255,9 @@ data class Video(
     val platform: String,
     val title: String,
     /**
-     * 正文（纯文本）。目前只有微信公众号会带：文章段落 / 贴图描述。
-     * 其他平台的历史记录里为空串，界面按「没有就不显示」处理。
+     * 正文（纯文本）。各平台能拿到原文的都填：公众号文章 / 微博正文与头条文章 /
+     * 小红书描述 / B站·YouTube 简介等。原文与标题是同一段话时（抖音、X）
+     * 引擎会置空，界面按「没有就不显示」处理。
      */
     val description: String = "",
     val uploader: String,

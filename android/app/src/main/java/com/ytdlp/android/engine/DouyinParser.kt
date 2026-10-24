@@ -94,6 +94,8 @@ object DouyinParser {
             JSONObject().apply {
                 put("id", id.ifBlank { expectedId })
                 put("title", detail.optString("desc"))
+                // 抖音的 desc 同时也是标题；引擎侧只在标题为空时才把正文留下
+                put("description", detail.optString("desc"))
                 put("uploader", author.optString("nickname"))
                 put(
                     "uploader_id",
@@ -179,12 +181,17 @@ object DouyinParser {
         return JSONObject().apply {
             put("id", expectedId)
             put("title", pick("desc", "desc"))
+            put("description", pick("desc", "desc"))
             put("uploader", pick("nickname", "nickname"))
             put("uploader_id", pick("unique_id", "unique_id"))
             put("duration", JSONObject.NULL)
             put("thumbnail", cover)
             put("source_url", sourceUrl)
-            put("content_type", if (liveCount > 0) "live" else "images")
+            // 判定口径是「**每一张**都带动效地址」才叫实况图，不是「有一张带动效」。
+            // 真机实测：一条 26 张的普通图集里只有 1 张带了 playAddr，按「任一张」
+            // 会被整条判成实况图（用户反馈的现象）；而实况合集 4/4、单张实况 1/1
+            // 都是全带，所以「全部」这个阈值能同时满足两边。
+            put("content_type", if (liveCount > 0 && liveCount == media.length()) "live" else "images")
             put("media", media)
         }
     }

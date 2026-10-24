@@ -173,7 +173,10 @@ class WeiboActivity : Activity() {
             }
             if (attempts < MAX_ATTEMPTS) {
                 attempts++
-                w.postDelayed({ extract() }, 700L * attempts)
+                // 固定 700ms 一轮。原来按 700ms×n 递增，8 轮理论要 25.2 秒 ——
+                // 比 15 秒的超时还长，等于「重试用尽」那条分支永远走不到，
+                // 用户每次都在等超时。
+                w.postDelayed({ extract() }, 700L)
             } else {
                 // 取数重试用完了：文章页和正文页的结论不一样，分开说清楚
                 deliver(
@@ -360,6 +363,25 @@ class WeiboActivity : Activity() {
                   if (el && (el.innerText || '').trim()) { title = el.innerText.trim(); break; }
                 }
                 if (!title) title = document.title || '';
+                // 正文：优先按内容容器取（不同版式的类名都试一遍），
+                // 都取不到就退回「把所有段落拼起来」—— 文章正文一定是段落结构。
+                var body = '';
+                var boxSels = ['#article_content', '.WB_article_content',
+                               '.article-content', '.article_content',
+                               '.WB_article_text', 'article'];
+                for (var b = 0; b < boxSels.length; b++) {
+                  var box = document.querySelector(boxSels[b]);
+                  var bt = box ? (box.innerText || '').trim() : '';
+                  if (bt.length > 20) { body = bt; break; }
+                }
+                if (!body) {
+                  var ps = document.querySelectorAll('p'), parts = [];
+                  for (var j = 0; j < ps.length; j++) {
+                    var pt = (ps[j].innerText || '').trim();
+                    if (pt) parts.push(pt);
+                  }
+                  body = parts.join('\n');
+                }
                 var seen = {}, out = [];
                 var imgs = document.querySelectorAll('img');
                 for (var i = 0; i < imgs.length; i++) {
@@ -372,7 +394,7 @@ class WeiboActivity : Activity() {
                   seen[s] = 1;
                   out.push(s);
                 }
-                return JSON.stringify({ article: { title: title, images: out } });
+                return JSON.stringify({ article: { title: title, content: body, images: out } });
               }catch(e){ return ''; }
             })()
         """

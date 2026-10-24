@@ -73,7 +73,14 @@ private val EXIF_COPY_TAGS = listOf(
 /** 解析页的状态。各态互斥，用 sealed 比「一个 result + 一堆 bool」更难写错。 */
 sealed interface ParseUi {
     data object Idle : ParseUi
-    data object Loading : ParseUi
+    /**
+     * 正在解析。
+     *
+     * @param hint 这一轮走的是哪条链路。三条链路的耗时和失败原因完全不同，
+     *   统一说「正在解析」会让人误以为卡住：X 走的是第三方服务（要出网），
+     *   抖音/小红书/微博要拉内置浏览器，其余走内置引擎。
+     */
+    data class Loading(val hint: String = "") : ParseUi
     data class Done(val video: Video) : ParseUi
     data class Failed(val message: String) : ParseUi
 
@@ -310,13 +317,49 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * 这一轮解析大概会走哪条链路，用来决定转圈时显示哪句话。
+     *
+     * 判断只能在**发起前**按域名猜：真正的路由是引擎在 Python 里决定的，
+     * 而那边是阻塞调用、中途不会回调。所以这里只做「最可能的那条」，
+     * 猜错的代价也只是文案不精确，不影响结果。
+     */
+    private fun loadingHint(url: String): String {
+        val u = url.lowercase()
+        return when {
+            // X 走的是 FxTwitter 这类第三方服务：要出网、和内置引擎无关，
+            // 失败原因也不一样（服务限流 / 401），文案不能混在一起说
+            u.contains("x.com/") || u.contains("twitter.com/") ->
+                "正在通过第三方解析服务…"
+            // 视频号只调一个公开接口读预览信息，没有视频流可下
+            u.contains("weixin.qq.com/sph") ->
+                "正在读取视频号公开信息…"
+            // 抖音**不走 yt-dlp**：它调的是 aweme.snssdk.com 的公开作品接口，
+            // 拿的是平台直链。这里要是也说「内置解析引擎」，用户会以为和
+            // B站/YouTube 是同一条路，失败时的排查方向也就不一样了。
+            u.contains("douyin.com") || u.contains("iesdouyin.com") ->
+                "正在直接读取抖音作品数据…"
+            // 快手同理：走的是移动版分享页的服务端数据，和 yt-dlp 无关。
+            // 用「间接」而不是「直接」是有意的：抖音那条是一次接口调用直接拿到
+            // mp4 地址，快手要先把整个网页抓下来、再从页面里挖数据 —— 两条路
+            // 的脆弱程度和失败原因都不一样，文案不该混为一谈。
+            u.contains("kuaishou.com") || u.contains("chenzhongtech.com") ->
+                "正在间接读取快手作品数据…"
+            // 小红书 / 微博：引擎会立刻回「要用浏览器」，真正干活的是 WebView
+            u.contains("xhslink") || u.contains("xiaohongshu.com") ||
+                u.contains("weibo.com") || u.contains("weibo.cn") ->
+                "正在打开内置浏览器…"
+            else -> "正在使用内置解析引擎…"
+        }
+    }
+
+    /**
      * 真正发起解析。
      *
      * 拆出来是因为「正文里挂视频」那条路要**接着上一次解析**再跑一遍：那属于同一次
      * 用户操作，不能再过一次授权门禁、也不能把 `trialCharged` 重置后重复扣次数。
      */
     private fun launchParse(target: String) {
-        _parse.value = ParseUi.Loading
+        _parse.value = ParseUi.Loading(loadingHint(target))
         parseJob = viewModelScope.launch {
             // Python 调用是阻塞的，withTimeoutOrNull 拦不住它 —— 超时后界面
             // 会立刻收到「超时」并恢复可用，而 Python 那边仍会跑完再把结果丢掉。
@@ -415,7 +458,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             _parse.value = ParseUi.Failed(reason.ifBlank { fallbackReason })
             return
         }
-        _parse.value = ParseUi.Loading
+        // 浏览器已经取到数据，这一步只是入库（图片/视频地址整理、写历史），
+        // 不再走网络，所以文案直说「正在整理解析结果」而不是继续转圈。
+        _parse.value = ParseUi.Loading("正在整理解析结果…")
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching { save(payloadJson) }

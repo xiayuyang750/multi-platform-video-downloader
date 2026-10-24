@@ -87,6 +87,8 @@ object XhsParser {
             put("id", id)
             put("source_url", shareUrl)
             put("title", title)
+            // 完整描述（含话题、换行）。标题只取首行，正文才是用户要读的内容。
+            put("description", desc)
             put("uploader", user.optString("nickname"))
             // 用户编号（小红书叫 redId / userId），界面作为「作者唯一标识」显示
             put("uploader_id", user.optString("userId").ifBlank { user.optString("redId") })

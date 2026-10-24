@@ -292,7 +292,10 @@ class XhsActivity : Activity() {
             if (!loggedIn(result)) enterLoginMode()
             if (extractAttempts < MAX_EXTRACT_ATTEMPTS) {
                 extractAttempts++
-                w.postDelayed({ extract() }, 800L * extractAttempts)
+                // 固定 800ms 一轮，**不要**乘次数：原来按 800ms×n 递增，
+                // 6 轮下来要 16.8 秒（800+1600+…+4800），比页面 hydration
+                // 实际需要的久得多，用户就是在干等。
+                w.postDelayed({ extract() }, 800L)
             } else if (loginMode && reloads < MAX_RELOADS) {
                 // 登录完了但页面停在首页/其它页：把分享链接再打开一次，
                 // 否则用户登录后一直等不到结果（实测反馈过这个担心）。
@@ -301,6 +304,14 @@ class XhsActivity : Activity() {
                 w.postDelayed({
                     if (!delivered) w.loadUrl(shareUrl)
                 }, 1500L)
+            } else if (!loginMode) {
+                // 页面已渲染、也不需要登录、重试也取不到 —— 结论已经明确，
+                // 没必要再空等到 20 秒超时。此时仍在 loginMode 里说明还没登录，
+                // 那种情况继续等用户操作即可，不能提前判失败。
+                deliver(
+                    null,
+                    "这条笔记已被删除，或已被作者设为私密。",
+                )
             }
         }
     }
@@ -391,7 +402,7 @@ class XhsActivity : Activity() {
         /** 正常链路（已登录）给 20 秒；进入登录模式后再宽限 3 分钟。 */
         private const val TIMEOUT_MS = 20_000L
         private const val LOGIN_EXTRA_MS = 180_000L
-        private const val MAX_EXTRACT_ATTEMPTS = 6
+        private const val MAX_EXTRACT_ATTEMPTS = 8
         private const val MAX_RELOADS = 3
 
         private const val DESKTOP_UA =

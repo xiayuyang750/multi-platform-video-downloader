@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import http.client
 import json
 import os
 import re
@@ -53,10 +54,89 @@ CONFIG_FILE = BASE_DIR / "defaults.json"
 # 与 Windows 端 engine.DIRECT_URL_HOSTS 对应，改一处要同步另一处。
 # 例外：mpvideo.qpic.cn（微信公众号文章里的视频）暂只在安卓端支持。
 DIRECT_URL_HOSTS = ("douyinvod.com", "365yg.com", "amemv.com", "video.twimg.com",
-                    "xhscdn.com", "rednotecdn.com", "mpvideo.qpic.cn")
+                    "xhscdn.com", "rednotecdn.com", "mpvideo.qpic.cn",
+                    # 快手：视频在 djvod.ndcimgs.com，备用 CDN 在 *.a.kwimgs.com。
+                    # 两者都是完整 mp4（实测 206 + avc1），交给 yt-dlp 只会报不支持。
+                    "ndcimgs.com", "kwimgs.com")
 
 # 直链分块下载的读取粒度。太小会让线程调度开销盖过收益，1 MiB 是实测的折中。
 _DIRECT_READ = 1 << 20
+
+# 正文入库前的长度上限。B站/YouTube 的简介动辄上万字，界面虽然默认只折 4 行，
+# 但整段塞进 sqlite 并跨语言传给 Kotlin 没有意义，截断到够展开阅读的长度即可。
+DESC_MAX_CHARS = 20000
+
+# 标题入库前的长度上限。各平台给的是「原文」，抖音的 desc 常带十几个话题标签、
+# 微博是整段正文，原样铺在卡片上会把下载按钮顶出屏幕。50 字是「一眼能读完、
+# 又不至于把标题截断成半句话」的折中。
+TITLE_MAX_CHARS = 50
+
+
+def _norm_description(raw, title: str = "") -> str:
+    """把各平台给的原文归一成「可直接展示的纯文本」。
+
+    各平台给的形态差别很大：微博/头条文章是 HTML，抖音是带换行的文案，
+    B站/YouTube 是纯文本，小红书是描述 + 话题。界面只认纯文本，所以统一在
+    入库这一层处理，而不是每个解析器各写一套。
+
+    [title] 用来去掉「正文和标题是同一段话」的情况：抖音的 desc、X 的推文
+    文本既是标题也是正文，原样存两份会让界面把同一段文字显示两遍。归一化后
+    与标题完全一致（忽略空白差异）时返回空串，界面按「没有正文」处理。
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    # 块级标签换行，否则 <p>a</p><p>b</p> 会被粘成 "ab"
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"</(?:p|div|li|h[1-6]|figure|tr|blockquote)\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    text = text.replace("\u200b", "").replace("\ufeff", "").replace("\xa0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    # 只有标点/符号的「正文」没有阅读价值（B站不少 MV 的简介就是一个「-」），
+    # 显示出来反而像是界面出了错，按没有正文处理。
+    # 用 Unicode 的「字母或数字」判定，不能只认中日韩与英数 —— 日文、韩文、
+    # 俄文标题都很常见，只认 ASCII + 汉字会把这些作品整条判成没有标题。
+    if not re.search(r"[^\W_]", text):
+        return ""
+    if len(text) > DESC_MAX_CHARS:
+        text = text[:DESC_MAX_CHARS].rstrip() + "…"
+    if title:
+        flat = re.sub(r"\s+", " ", text).strip()
+        same = re.sub(r"\s+", " ", str(title)).strip()
+        # 只有「标题短到能完整显示」时才把正文丢掉。超过标题上限的原文
+        # （抖音带一串话题的长文案、X 的长推文）必须留作正文，否则标题被
+        # 截断后那部分内容就彻底看不到了。
+        if flat and flat == same and len(flat) <= TITLE_MAX_CHARS:
+            return ""
+    return text
+
+
+def _norm_title(raw, body: str = "") -> str:
+    """把各平台给的「标题原文」收成一行、限长 50 字。
+
+    规则按优先级：
+      1. 有标题就用标题（压成一行、限长）；
+      2. 没标题就用正文的第一段代替；
+      3. 两者都没有就留空 —— 界面按「无标题」处理，不编造。
+
+    为什么要限长：抖音的 desc 常带十几个话题标签、微博的标题就是整段正文，
+    原样铺开会把播放器和下载按钮顶出屏幕。50 字之后截断并补省略号。
+    截断按字符数（不是字节数）：这里只管「看着多长」，文件名另有一套按字节
+    预算的裁剪规则（见 _direct_stem）。
+    """
+    text = _norm_description(raw)
+    if text:
+        text = re.sub(r"\s*\n+\s*", " ", text).strip()
+    if not text and body:
+        text = re.sub(r"\s*\n+\s*", " ", _norm_description(body)).strip()
+    if not text:
+        return ""
+    if len(text) > TITLE_MAX_CHARS:
+        text = text[:TITLE_MAX_CHARS].rstrip() + "…"
+    return text
 
 PLATFORM_RULES = [
     ("YouTube", r"(^|//)([a-z0-9-]+\.)*youtu\.?be"),
@@ -87,6 +167,10 @@ PLATFORM_RULES = [
     # 注意：微博分享里的 `t.cn` 短链**没认** —— t.cn 是新浪的通用短链，
     # 认了会把非微博内容也判成微博；等拿到真实分享链接再决定。
     ("微博", r"(^|//)([a-z0-9-]+\.)*(weibo\.com|weibo\.cn)(?![a-z0-9.-])"),
+    # 快手。分享短链是 v.kuaishou.com/<code>，移动 UA 下会 302 到
+    # v.m.chenzhongtech.com/fw/photo/<id>（同一家的分享页域名，实测带完整数据）。
+    # 两个域名都要认，否则直接把 chenzhongtech 链接贴进来会落到「其他」。
+    ("快手", r"(^|//)([a-z0-9-]+\.)*(kuaishou\.com|chenzhongtech\.com)(?![a-z0-9.-])"),
 ]
 
 # 安卓文件名硬上限是 255 **字节**（ext4 / FUSE 的限制都是按字节算的）。
@@ -172,14 +256,20 @@ DOUYIN_APP_UA = (
     "Build/SP1A.210812.016; Cronet/TTNetVersion)"
 )
 
-DOUYIN_FEED_API = "https://aweme.snssdk.com/aweme/v1/feed/?aweme_id={id}"
+DOUYIN_FEED_API = "https://aweme.snssdk.com/aweme/v1/feed/?aweme_id={id}&aid={aid}"
+
+# 同一个 feed 接口在不同 `aid`（App 渠道号）下服务不同的作品池，谁都不全：
+#   7696897222785752937 —— aid=1128 整条忽略（只回推荐流），aid=6383 第一条就是它；
+#   7692727357479989234 —— 反过来只有 1128 命中，6383 漏。
+# 所以两个都要问，命中即用（并发发起，见 _parse_douyin_via_api）。
+DOUYIN_FEED_AIDS = ("1128", "6383")
 
 # 必须随请求带上这些「App 公共参数」，否则接口会对**部分**作品忽略 aweme_id，
 # 直接把推荐流当结果返回（实测：橱窗视频 7688382195358027034 不带参数时连打 5 次
 # 全部拿不到目标，返回的是随机推荐作品；带上参数后连打 4 次 4 次命中，
 # 且作者/标题/档位都与分享链接一致）。这些值都是客户端公开参数，不含任何密钥。
 DOUYIN_COMMON_PARAMS = (
-    "aid=1128&device_platform=android&channel=googleplay&os_version=12"
+    "device_platform=android&channel=googleplay&os_version=12"
     "&version_code=260201&version_name=26.2.1&device_type=Pixel%204"
     "&device_brand=google&os_api=31&resolution=1080*2340&dpi=420"
     "&language=zh&ac=wifi&update_version_code=260201"
@@ -224,12 +314,41 @@ def _douyin_live_url(img: dict) -> str:
     return ""
 
 
+def _resolve_short_once(url: str) -> str:
+    """只发一次请求，返回 302 的 `Location`，**不跟随跳转**。
+
+    为什么要这么抠：实测第一跳的 Location 里就已经带着作品编号
+    （`https://www.iesdouyin.com/share/video/7696897222785752937/...`）。
+    如果交给 urllib 自动跟随，它还会再连一次 iesdouyin（甚至再跳 douyin.com）
+    并下载整个分享页 —— 我们只要那个编号，多出来的 1~2 个 TLS 往返纯属浪费。
+    """
+    p = urlparse(url)
+    if p.scheme not in ("http", "https") or not p.hostname:
+        return ""
+    conn_cls = (
+        http.client.HTTPSConnection if p.scheme == "https" else http.client.HTTPConnection
+    )
+    path = p.path or "/"
+    if p.query:
+        path += "?" + p.query
+    conn = conn_cls(p.hostname, p.port, timeout=10)
+    try:
+        conn.request(
+            "GET",
+            path,
+            headers={"User-Agent": _BROWSER_UA, "Connection": "close"},
+        )
+        return conn.getresponse().getheader("Location") or ""
+    finally:
+        conn.close()
+
+
 def douyin_video_id(url: str) -> str:
     """从抖音分享链接里取出作品 ID。
 
     两种形态都要支持：
       - 长链 https://www.douyin.com/video/7689396203758521646 → 直接正则
-      - 短链 https://v.douyin.com/XiRYwhL6CnQ/                → 先跟随跳转
+      - 短链 https://v.douyin.com/XiRYwhL6CnQ/                → 看 302 的 Location
     """
     text = url or ""
     m = (
@@ -239,8 +358,17 @@ def douyin_video_id(url: str) -> str:
     if m:
         return m.group(1)
 
-    # 短链要跟随一次跳转才能看到真实地址（实测 302 到 www.douyin.com/video/<id>）
     if "v.douyin.com" in text or "iesdouyin.com" in text:
+        # 先走「只读第一跳」的快路（省 1~2 个 TLS 往返）
+        try:
+            location = _resolve_short_once(text)
+        except Exception:  # noqa: BLE001
+            location = ""
+        m = re.search(r"/(?:video|note)/(\d{10,25})", location or "")
+        if m:
+            return m.group(1)
+
+        # 快路拿不到（首跳无 Location / 格式变了）再退回自动跟随，宁可慢也不能错
         try:
             req = urllib.request.Request(text, headers={"User-Agent": _BROWSER_UA})
             with urllib.request.urlopen(req, timeout=15) as resp:
@@ -254,11 +382,14 @@ def douyin_video_id(url: str) -> str:
     return ""
 
 
-def _tier_label(height: int, vcodec: str, filesize: int | None) -> str:
+def _tier_label(height: int, vcodec: str, filesize: int | None, note: str = "") -> str:
     """拼一条档位的展示文案，如「720p · H.265 · 37.4 MB」。
 
     在 Python 侧拼好、界面直接显示 —— 两端（安卓 / Windows）与 Kotlin 侧
     都不必各写一份格式化逻辑，避免三处各算出不一样的字符串。
+
+    [note] 是「来源说明」（如「平台默认档」），固定排在**体积之前**：
+    档位列表是竖排多行，体积放在最后一列，各行的数字才对得齐。
     """
     parts = []
     if height:
@@ -268,6 +399,8 @@ def _tier_label(height: int, vcodec: str, filesize: int | None) -> str:
     }.get(vcodec or "", "")
     if codec:
         parts.append(codec)
+    if note:
+        parts.append(note)
     if filesize:
         parts.append(f"{filesize / 1024 / 1024:.1f} MB")
     return " · ".join(parts) or "原始画质"
@@ -322,19 +455,25 @@ def douyin_collect_tiers(video: dict) -> list[dict]:
     # 那时 rows 是空的，这个地址自然就成了唯一一档。
     #
     # 编码**不猜**：play_addr 字段本身不带 vcodec，猜错等于标签撒谎，
-    # 所以留空 —— 标签里就只显示分辨率。
+    # 所以留空，靠「平台默认档」这几个字把来源说清楚。
+    #
+    # 体积**要读**：play_addr.data_size 是有的（实测 720p 那条 21,048,623 字节），
+    # 早先这里写死 None，界面上就只剩一个光秃秃的「720p」。
     pa = video.get("play_addr") or {}
     pa_urls = pa.get("url_list") or []
     default_url = pa_urls[0] if pa_urls else ""
     if default_url and not any(r["url"] == default_url for r in rows):
+        pa_size = pa.get("data_size")
         rows.append({
             "height": int(pa.get("height") or 0),
             "vcodec": "",
             "fmt": "mp4",
             "kbps": 0,
-            "filesize": None,
+            "filesize": int(pa_size) if pa_size else None,
             "url": default_url,
             "hash": str(pa.get("file_hash") or ""),
+            # 标记它是「平台默认流」—— 界面靠这个后缀解释「为什么没有编码」
+            "is_default": True,
         })
 
     rows.sort(
@@ -342,7 +481,10 @@ def douyin_collect_tiers(video: dict) -> list[dict]:
         reverse=True,
     )
     for r in rows:
-        r["label"] = _tier_label(r["height"], r["vcodec"], r["filesize"])
+        r["label"] = _tier_label(
+            r["height"], r["vcodec"], r["filesize"],
+            note="平台默认档" if r.pop("is_default", False) else "",
+        )
     return rows
 
 
@@ -372,6 +514,153 @@ def douyin_pick_tiers(video: dict) -> tuple:
     if not best_any:
         best_any = best_play
     return best_play, best_any
+
+
+# ==================== 快手：移动版分享页的服务端数据 ====================
+# 实测结论（2026-10）：
+#   · 分享短链 v.kuaishou.com/<code> 的跳转目标**取决于 UA**：
+#       桌面 UA → www.kuaishou.com/short-video/<id>，页面是 JS 壳，零数据；
+#       移动 UA → v.m.chenzhongtech.com/fw/photo/<id>，服务端直出完整 JSON。
+#     所以这条链路必须伪装成移动浏览器。
+#   · 全程不需要登录、不需要 Cookie、不需要 __NS_sig3 签名。
+#   · 页面里的数据在一个 <script> 里，**根对象的 key 被凯撒位移混淆**
+#     （`tusjoh` = `string`），但内层字段名是正常的，因此解析要「按值找
+#     同时含 photoId 与 photoType 的对象」，不能按固定路径取。
+KUAISHOU_UA = (
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+)
+KUAISHOU_MOBILE_PAGE = "https://v.m.chenzhongtech.com/fw/photo/{pid}"
+
+
+def _ks_photo_id(url: str) -> str:
+    """从短链跳转后的地址里取作品编号（short-video / fw/photo / photo 三种路径）。"""
+    m = re.search(r"(?:short-video|/photo|fw/photo)/([0-9A-Za-z_-]+)", url or "")
+    return m.group(1) if m else ""
+
+
+def _ks_fetch(url: str) -> tuple:
+    req = urllib.request.Request(url, headers={"User-Agent": KUAISHOU_UA})
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        return resp.geturl(), resp.read().decode("utf-8", "replace")
+
+
+def _ks_ssr_json(html: str):
+    """抠出页面 <script> 里那段服务端数据。
+
+    定位用 `"photoType"` 这个内层字段名（它不在混淆的根 key 里），
+    再回退到最近的 <script> 标签取整段内容。
+    """
+    i = html.find('"photoType"')
+    if i < 0:
+        return None
+    start = html.rfind("<script", 0, i)
+    body_start = html.find(">", start)
+    end = html.find("</script>", body_start)
+    if body_start < 0 or end < 0:
+        return None
+    body = html[body_start + 1:end].strip()
+    for candidate in (body, body[body.find("{"):body.rfind("}") + 1]):
+        try:
+            return json.loads(candidate)
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _ks_find_photo(obj) -> dict | None:
+    """在（key 被混淆的）JSON 里按值找出作品对象。
+
+    判据是「同时有 photoId 和 photoType」——比按路径取稳，页面结构改版
+    只影响外层包裹，这两个字段是作品本身的标识。
+    """
+    if isinstance(obj, dict):
+        if "photoType" in obj and "photoId" in obj:
+            return obj
+        for v in obj.values():
+            found = _ks_find_photo(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for v in obj:
+            found = _ks_find_photo(v)
+            if found:
+                return found
+    return None
+
+
+def _ks_video_tiers(photo: dict) -> list[dict]:
+    """把 manifest.adaptationSet 里的各路码流整理成档位（好 → 差）。
+
+    两处坑（实测）：
+      · 竖屏视频的 `height` 是长边（1080x1920 会给出 height=1920），直接当
+        「1920p」显示是错的。真正的档位名在 `qualityType` 里（如 "720p"）。
+      · 同一分辨率常有两条不同码率，标签会一模一样。这里按档位名去重，
+        保留码率高的那条，免得界面上出现两个「720p」。
+    编码不猜：网页数据里没有 vcodec 字段，标签就只写分辨率。
+    """
+    best: dict[int, tuple[int, str]] = {}
+    for group in (photo.get("manifest") or {}).get("adaptationSet") or []:
+        for rep in group.get("representation") or []:
+            url = str(rep.get("url") or "")
+            if not url:
+                continue
+            qt = str(rep.get("qualityType") or "")
+            m = re.match(r"(\d+)p", qt)
+            if m:
+                height = int(m.group(1))
+            else:
+                # 没有档位名时退回短边 —— 竖屏视频的 height 是长边，不能直接用
+                height = min(int(rep.get("width") or 0), int(rep.get("height") or 0))
+            bitrate = int(rep.get("avgBitrate") or 0)
+            old = best.get(height)
+            if old is None or bitrate > old[0]:
+                best[height] = (bitrate, url)
+
+    rows = [{"height": h, "vcodec": "", "filesize": None, "url": u, "selector": ""}
+            for h, (_, u) in best.items()]
+    # 兜底：manifest 为空时（老作品）用 mainMvUrls 那条默认流
+    if not rows:
+        seen: set[str] = set()
+        for item in photo.get("mainMvUrls") or []:
+            url = str((item or {}).get("url") or "")
+            if url and url not in seen:
+                seen.add(url)
+                rows.append({"height": 0, "vcodec": "", "filesize": None,
+                             "url": url, "selector": ""})
+    rows.sort(key=lambda r: r["height"], reverse=True)
+    for r in rows:
+        r["label"] = _tier_label(r["height"], r["vcodec"], r["filesize"])
+    return rows
+
+
+def _ks_atlas_media(photo: dict) -> list[dict]:
+    """图集：ext_params.atlas 里是「路径列表 + 尺寸表 + CDN 列表」。
+
+    地址要自己拼：`https://<cdn><path>`。CDN 有多个候选，取第一个；
+    下载那张图时如果失败，用户重试会重新解析，不至于一直用坏节点。
+    """
+    atlas = (photo.get("ext_params") or {}).get("atlas") or {}
+    paths = atlas.get("list") or []
+    sizes = atlas.get("size") or []
+    cdns = [c.get("cdn") for c in (atlas.get("cdnList") or []) if c.get("cdn")]
+    if not cdns:
+        cdns = atlas.get("cdn") or []
+    if not cdns or not paths:
+        return []
+    media: list[dict] = []
+    for i, path in enumerate(paths):
+        if not path:
+            continue
+        size = sizes[i] if i < len(sizes) else {}
+        media.append({
+            "url": f"https://{cdns[0]}{path}",
+            "width": int((size or {}).get("w") or 0),
+            "height": int((size or {}).get("h") or 0),
+            "live": "",
+            "kind": "image",
+        })
+    return media
 
 
 # ==================== yt-dlp 平台：把 formats 归并成档位 ====================
@@ -826,6 +1115,10 @@ class Store:
             self.conn.execute("ALTER TABLE history ADD COLUMN description TEXT")
 
     def upsert(self, rec: dict) -> None:
+        # 标题在这里统一收口：各平台拿到的是原文（抖音带一串话题、微博是整段
+        # 正文），限长与「没标题就拿正文顶上」的规则只写一份。就地改 rec，
+        # 这样调用方返回给界面的也是同一个短标题，历史库与解析结果不会不一致。
+        rec["title"] = _norm_title(rec.get("title"), rec.get("description") or "")
         # 图文类没有 resolved_url / download_url / play_kind，这里补默认值，
         # 免得每条调用点都要自己填一遍。
         row = {
@@ -860,7 +1153,12 @@ class Store:
                     content_type = excluded.content_type,
                     media_json   = excluded.media_json,
                     source_md5   = excluded.source_md5,
-                    description  = excluded.description
+                    -- 正文是「有就更新、没有就保留」：重新解析或走备用链路时可能
+                    -- 拿不到正文（例如某条链路只给标题），不能让空串把上次存下的
+                    -- 正文冲掉。
+                    description  = CASE WHEN excluded.description = ''
+                                        THEN history.description
+                                        ELSE excluded.description END
                 """,
                 row,
             )
@@ -1569,7 +1867,16 @@ class Engine:
             "no_warnings": True,
             "noprogress": True,
             "ignoreconfig": True,
-            "socket_timeout": int(eng.get("socket_timeout") or 20),
+            # 单次网络操作的超时从 20 秒压到 10 秒：
+            # 「没开 VPN 打不开境外站」这类失败是连接挂起，20 秒纯属干等；
+            # 配合 extractor_retries=1，最坏约 20 秒就能报错。
+            # 注意这是**单次操作**超时，不是总时长 —— 正常解析（含 YouTube 的
+            # JS 挑战）不受影响，只是不再无限期挂在一次连接上。
+            "socket_timeout": int(eng.get("socket_timeout") or 10),
+            # 提取阶段只重试 1 次：yt-dlp 默认 extractor_retries=3，
+            # 配 20 秒 socket 超时，最坏能拖到 60 秒以上 —— 用户体感就是「卡住」。
+            # 一次足够覆盖偶发失败，再不行就是真取不到。
+            "extractor_retries": 1,
             "noplaylist": bool(dl.get("single_video_no_playlist", True)),
             # 安卓上这个开关是有效的（只在 Windows 上无效）。开着它，
             # 中文标题会保留，但 ? * : " < > | \ 这些会被替换掉 ——
@@ -1643,6 +1950,11 @@ class Engine:
         # 加登录态，HTTP 客户端两样都拿不到，yt-dlp 必然 403 —— 先跑纯粹是白等。
         if platform == "抖音":
             return self._parse_douyin(url)
+
+        # 快手：移动版分享页直出数据，纯 HTTP 即可（不需要登录 / 签名）。
+        # 不走 yt-dlp —— 它没有快手提取器。
+        if platform == "快手":
+            return self._parse_kuaishou(url)
 
         # 小红书同理，直接交给**应用内置浏览器**，不再先跑 yt-dlp。
         # 曾经它是「先 yt-dlp（带用户导出的 Cookie）、失败才浏览器」，现在去掉前半段，
@@ -1835,16 +2147,58 @@ class Engine:
         if not vid:
             raise RuntimeError("没能从链接里识别出作品编号")
 
-        req = urllib.request.Request(
-            DOUYIN_FEED_API.format(id=vid) + "&" + DOUYIN_COMMON_PARAMS,
-            headers={"User-Agent": DOUYIN_APP_UA},
-        )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            body = json.loads(resp.read().decode("utf-8", "replace"))
+        # 两个 aid 并发请求，谁先带回目标就用谁。
+        #
+        # 为什么并发而不是串行：图文 / 图集 / 实况图这类「笔记」，接口在任何 aid 下都
+        # 不服务，串行就要白跑两轮才降级到 WebView —— 用户能明显感觉到「图片和实况图
+        # 变慢了」。并发只花 1 个往返，和只试一个 aid 一样快。
+        #
+        # 为什么不做「整轮重试」：没有任何证据表明它能提高命中率，却让上面那种
+        # 必然落空的场景再翻一倍（试过 4 次请求 + 0.4 秒休眠，已回退）。
+        found: dict = {}
 
-        items = body.get("aweme_list") or []
-        if not items:
-            raise RuntimeError("接口没有返回作品数据（可能作品已删除或设为私享）")
+        def _try_aid(aid: str) -> None:
+            try:
+                req = urllib.request.Request(
+                    DOUYIN_FEED_API.format(id=vid, aid=aid) + "&" + DOUYIN_COMMON_PARAMS,
+                    headers={"User-Agent": DOUYIN_APP_UA},
+                )
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    body = json.loads(resp.read().decode("utf-8", "replace"))
+            except Exception:  # noqa: BLE001
+                return
+            batch = body.get("aweme_list") or []
+            hit = next(
+                (x for x in batch if str(x.get("aweme_id") or "") == vid),
+                None,
+            )
+            if not batch:
+                return
+            if len(batch) > len(found.get("items") or []):
+                found["items"] = batch
+            if hit is not None:
+                found["target"] = hit
+
+        workers = [
+            threading.Thread(target=_try_aid, args=(a,), daemon=True)
+            for a in DOUYIN_FEED_AIDS
+        ]
+        for w in workers:
+            w.start()
+        # 谁先带回目标就用谁，**立刻返回**。
+        #
+        # 不能写成 `for w in workers: w.join()`：那是等**最慢**的那个，
+        # 实测快的一条 2.2 秒就命中，慢的要 2.9~3.7 秒，白等 0.5~1.5 秒。
+        # 只在「两个都没命中」时才需要等齐（错误信息里要报条数）。
+        deadline = time.monotonic() + 25
+        while True:
+            if found.get("target") is not None:
+                break
+            if not any(w.is_alive() for w in workers):
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
 
         # 这个接口是「推荐流」性质的：它以 aweme_id 作为种子拉一条 feed，
         # 种子作品可服务时会被原样带回（实测排在返回列表第一位），其余是推荐作品。
@@ -1852,15 +2206,16 @@ class Engine:
         #   1) 图文 / 图集 / 实况图这类「笔记」—— 接口不服务；
         #   2) 视频本身取不到（已删除 / 仅自己可见 / 权限受限）。
         # 另有一种「接口直接忽略 aweme_id 只回推荐流」的情况（实测橱窗视频），
-        # 已由 DOUYIN_COMMON_PARAMS 修掉，不要再删那串参数。
+        # 已由 DOUYIN_COMMON_PARAMS 修掉大半，剩下的就靠换 aid 兜。
         #
         # 绝不能退回 items[0]：实测 7 条不同的图集/实况图链接会拿到**同一条无关视频**，
         # 而界面显示「解析成功」，用户会把别人的视频当成自己的内容下走（伪成功）。
         # 取不到就明确失败，交给上层降级到 WebView（那里能从页面主文档里拿到笔记数据）。
-        target = next(
-            (x for x in items if str(x.get("aweme_id") or "") == vid),
-            None,
-        )
+        target = found.get("target")
+        items: list[dict] = found.get("items") or []
+
+        if not items:
+            raise RuntimeError("接口没有返回作品数据（可能作品已删除或设为私享）")
         if target is None:
             raise RuntimeError(
                 f"接口返回的 {len(items)} 条里没有这条作品"
@@ -1911,6 +2266,10 @@ class Engine:
                     "media_json": json.dumps(media, ensure_ascii=False),
                     "tiers": [],
                     "source_md5": "",
+                    # 抖音的 desc 既是标题也是正文；短文案归一化后会置空，
+                    # 长文案（超过标题上限）保留，标题被截断的部分还能在正文里读到
+                    "description": _norm_description(
+                        target.get("desc"), target.get("desc") or ""),
                 }
                 self.store.upsert(rec)
                 quality = (f"实况图 · 共 {len(media)} 张" if ctype == "live"
@@ -1963,6 +2322,9 @@ class Engine:
             # 平台自报的 MD5：取默认下载档（第一档）那条。有它，界面就能在
             # **下载之前**把 MD5 显示出来，不必等文件下来
             "source_md5": (tiers[0].get("hash") or "") if tiers else "",
+            # 同图集分支：长文案的标题会被截断，全文留在正文里
+            "description": _norm_description(
+                target.get("desc"), target.get("desc") or ""),
         }
         self.store.upsert(rec)
         return {
@@ -1970,6 +2332,133 @@ class Engine:
             **self._with_local_path(rec),
             "quality": quality,
             "filesize": "",
+        }
+
+    def _parse_kuaishou(self, url: str) -> dict:
+        """快手：移动版分享页的 SSR 数据，纯 HTTP，不需要登录。
+
+        能拿到的形态（实测）：
+          · VIDEO              —— 视频，manifest 里有 1080p / 720p 多档
+          · HORIZONTAL_ATLAS   —— 图集（含「实况合集」，平台在网页里只给静态图）
+          · VERTICAL_ATLAS     —— 长图图集
+          · SINGLE_PICTURE     —— 单张图片 / 单张实况（同样只有静态图）
+
+        **实况的「动」这一段拿不到**：网页数据里既没有每张图的动效地址，
+        下载下来的也都是无动画块的静态 WebP。所以实况一律按「图文」处理，
+        不假装它是实况 —— 动效要等 App 内部接口那条路（待做）。
+        """
+        try:
+            final, html = _ks_fetch(url)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"打开快手页面失败：{type(exc).__name__}: {exc}"}
+
+        pid = _ks_photo_id(final) or _ks_photo_id(url)
+        # 桌面 UA / 直接贴 www 链接时落到的是 JS 壳页，换移动页再取一次
+        if '"photoType"' not in html and pid:
+            try:
+                final, html = _ks_fetch(KUAISHOU_MOBILE_PAGE.format(pid=pid))
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False,
+                        "error": f"读取快手作品页失败：{type(exc).__name__}: {exc}"}
+
+        photo = _ks_find_photo(_ks_ssr_json(html) or {})
+        if not photo:
+            return {
+                "ok": False,
+                "error": "没从快手页面里读到作品数据。\n"
+                         "常见原因：作品已删除 / 仅自己可见，或页面结构变了。",
+            }
+
+        ptype = str(photo.get("photoType") or "")
+        caption = str(photo.get("caption") or "")
+        covers = photo.get("coverUrls") or []
+        cover = str((covers[0] or {}).get("url") or "") if covers else ""
+        duration_ms = photo.get("duration") or 0
+        pid_out = str(photo.get("photoId") or pid or url)
+
+        base = {
+            "id": pid_out,
+            "platform": "快手",
+            "title": caption,
+            "description": _norm_description(caption, caption),
+            "uploader": photo.get("userName") or "",
+            "uploader_id": str(photo.get("userId") or photo.get("kwaiId") or ""),
+            "duration": int(duration_ms // 1000) if duration_ms else None,
+            "thumbnail": cover,
+            "source_url": url,
+            "resolved_at": int(time.time()),
+            "source_md5": "",
+        }
+
+        if ptype == "VIDEO":
+            tiers = _ks_video_tiers(photo)
+            if not tiers:
+                return {"ok": False, "error": "这条快手视频没有可用的播放地址（可能已删除）。"}
+            # 播放保守取 ≤720p（兼容性最好），下载取最高档
+            play = next((t["url"] for t in tiers if t["height"] and t["height"] <= 720),
+                        tiers[-1]["url"])
+            download = tiers[0]["url"]
+            quality = next((t["label"] for t in tiers if t["url"] == play),
+                           tiers[0]["label"])
+            rec = {
+                **base,
+                "resolved_url": play,
+                "download_url": download,
+                "play_kind": "progressive",
+                "content_type": "video",
+                "media_json": "",
+                "tiers": tiers,
+            }
+            self.store.upsert(rec)
+            return {"ok": True, **self._with_local_path(rec),
+                    "quality": quality, "filesize": ""}
+
+        if "ATLAS" in ptype:
+            media = _ks_atlas_media(photo)
+            if not media:
+                return {"ok": False, "error": "这条快手图集里没有取到图片。"}
+            rec = {
+                **base,
+                "resolved_url": "",
+                "download_url": "",
+                "play_kind": "none",
+                "content_type": "images",
+                "media_json": json.dumps(media, ensure_ascii=False),
+                "tiers": [],
+            }
+            self.store.upsert(rec)
+            return {"ok": True, **self._with_local_path(rec),
+                    "quality": f"图文 · 共 {len(media)} 张", "filesize": ""}
+
+        if ptype == "SINGLE_PICTURE":
+            if not cover:
+                return {"ok": False, "error": "这条快手作品没有取到图片。"}
+            media = [{
+                "url": cover,
+                "width": int(photo.get("width") or 0),
+                "height": int(photo.get("height") or 0),
+                "live": "",
+                "kind": "image",
+            }]
+            rec = {
+                **base,
+                "resolved_url": "",
+                "download_url": "",
+                "play_kind": "none",
+                "content_type": "images",
+                "media_json": json.dumps(media, ensure_ascii=False),
+                "tiers": [],
+            }
+            self.store.upsert(rec)
+            # volume=1 是「单张实况」：动效拿不到，如实说明只给了静态图
+            vol = ((photo.get("ext_params") or {}).get("single") or {}).get("volume")
+            note = "（该作品含动效，当前仅支持静态图）" if vol else ""
+            return {"ok": True, **self._with_local_path(rec),
+                    "quality": f"图文 · 共 1 张{note}", "filesize": ""}
+
+        return {
+            "ok": False,
+            "error": f"暂不支持这种快手内容（平台类型：{ptype or '未知'}）。",
         }
 
     def save_xhs(self, payload_json: str) -> dict:
@@ -2019,6 +2508,8 @@ class Engine:
             "id": str(data.get("id") or url),
             "platform": platform,
             "title": data.get("title") or "",
+            # 浏览器链路带回来的原文（小红书 desc / 微博 status.text / 头条文章正文）
+            "description": _norm_description(data.get("description"), data.get("title") or ""),
             "uploader": data.get("uploader") or "",
             "uploader_id": data.get("uploader_id") or "",
             "duration": data.get("duration"),
@@ -2084,6 +2575,9 @@ class Engine:
             "id": str(data.get("id") or url),
             "platform": "抖音",
             "title": data.get("title") or "",
+            # 抖音的 desc 同时就是标题，归一化里会把「与标题相同」的正文丢掉，
+            # 这里保留映射只是为了标题为空时（接口没给 desc）还能有正文。
+            "description": _norm_description(data.get("description"), data.get("title") or ""),
             "uploader": data.get("uploader") or "",
             "uploader_id": data.get("uploader_id") or "",
             "duration": data.get("duration"),
@@ -2273,6 +2767,10 @@ class Engine:
             "id": data.get("id") or url,
             "platform": "X",
             "title": data.get("title") or "",
+            # X 的 title 就是推文全文。短推文归一化后与标题相同会置空，
+            # 长推文（超过标题上限、会被截断）保留全文，方便复制原文。
+            "description": _norm_description(
+                data.get("title"), data.get("title") or ""),
             "uploader": data.get("uploader") or "",
             "uploader_id": data.get("uploader_id") or "",
             "duration": data.get("duration"),
@@ -2320,7 +2818,7 @@ class Engine:
         # （要么被风控、要么只有图文），但**直链已经由浏览器取数入库**。
         # 漏掉它的后果实测过：下载会拿原始短链去喂 yt-dlp，报 Unsupported URL，
         # 界面上的表现就是「下载失败：不支持这种链接」。
-        if detect_platform(url) not in ("抖音", "X", "小红书", "微信公众号"):
+        if detect_platform(url) not in ("抖音", "X", "小红书", "微信公众号", "快手"):
             return url
         for rec in self.store.all():
             if rec.get("source_url") == url:
@@ -3285,6 +3783,10 @@ class Engine:
             "id": str(info.get("id") or ""),
             "platform": detect_platform(source),
             "title": info.get("title") or "",
+            # yt-dlp 对所有站点都会带 description（B站简介、YouTube 详情、
+            # 微博视频页文案…）。这里是所有 yt-dlp 平台的公共出口，接在
+            # 这一处就等于一次性覆盖它们，不必逐平台写。
+            "description": _norm_description(info.get("description"), info.get("title") or ""),
             "uploader": info.get("uploader") or info.get("channel") or "",
             # uploader_id 是平台的唯一标识（推特号 / B站 UID / 抖音号等），
             # 部分平台没有这个字段，界面按「没有就不显示」处理

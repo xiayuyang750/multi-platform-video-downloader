@@ -253,7 +253,7 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 "支持直接粘贴整段分享文案，会自动提取其中的链接。\n" +
                     // 加「等」是必要的：除这几家之外还有不少站点能认，
                     // 写死成「只支持这几个」不属实。
-                    "支持 YouTube / B站 / 抖音 / TikTok / X / Instagram / 小红书 / 微博 等平台。" +
+                    "支持 YouTube / B站 / 抖音 / 快手 / TikTok / X / Instagram / 小红书 / 微博 / 公众号 等平台。" +
                     "境外站点需要开着 VPN。"
             )
         }
@@ -272,10 +272,18 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                         strokeWidth = 2.dp,
                         color = tone.accent,
                     )
-                    Text("正在解析，请稍候…", fontSize = Font.body, color = tone.textMuted)
+                    Text(
+                        state.hint.ifBlank { "正在使用内置解析引擎…" },
+                        fontSize = Font.body,
+                        color = tone.textMuted,
+                    )
                 }
                 Spacer12()
-                Hint("境外站点可能要几十秒。若一直卡住，多半是 VPN 没开。")
+                // 只有「可能要出网」的链路才提 VPN。抖音 / 视频号走的是境内接口，
+                // 小红书 / 微博是本地 WebView，把它们套上这句话会让人白折腾一遍网络。
+                if (state.hint.contains("引擎") || state.hint.contains("第三方")) {
+                    Hint("境外站点可能要几十秒。若一直卡住，多半是 VPN 没开。")
+                }
             }
 
             is ParseUi.Failed -> Card {
@@ -321,7 +329,7 @@ fun ParseScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                             when (state.kind) {
                                 "xhs" -> "正在用内置浏览器解析这条笔记…"
                                 "weibo" -> "正在用内置浏览器读取这条微博…"
-                                else -> "正在解析该视频…"
+                                else -> "正在用内置浏览器读取这条作品…"
                             },
                             fontSize = Font.body,
                             color = tone.textMuted,
@@ -439,7 +447,7 @@ private fun ResultCard(
             Text(spec.joinToString(" · "), fontSize = Font.meta, color = tone.textMuted)
         }
 
-        // 正文（目前只有微信公众号会带）。默认折 4 行，长文不把下载按钮顶出屏幕。
+        // 正文。默认折 4 行，长文不把下载按钮顶出屏幕。
         if (video.description.isNotBlank()) {
             Spacer(Modifier.height(Dim.gap))
             BodyBlock(video.description)
