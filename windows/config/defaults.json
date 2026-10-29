@@ -14,8 +14,10 @@
     "js_runtimes": "node",
     "ffmpeg_dir": "D:\\Dev-env\\FFmpeg\\bin",
     "concurrent_fragments": 8,
+    "direct_threads": 6,
+    "socket_timeout": 20,
     "progress_delta": 1,
-    "progress_template": "download:__PROG__%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s"
+    "progress_template": "download:__PROG__%(progress._percent_str)s|%(progress.speed)s|%(progress.eta)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s"
   },
 
   "cookies": {

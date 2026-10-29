@@ -3537,6 +3537,39 @@ class Engine:
         return {"ok": True, "before": before, "after": after,
                 "changed": before != after, "path": target}
 
+    def extract_video_cover(self, video: str, dst: str, at_sec: float = 0.0) -> dict:
+        """抽视频中 `at_sec` 秒处的一帧存成 JPEG，返回 {ok, error}。
+
+        实况图的封面**不必是首帧**：手机拍的实况图，封面取的是拍摄瞬间那一帧，
+        落在视频中段（视频里既有按下前的一小段、也有按下后的一小段）。所以播放时
+        会先看到静图、再跳回视频开头播，有「动起来」的过渡感。
+
+        如果把封面取成第 0 帧，静图与视频第一帧像素级相同，长按播放就变成了
+        「无缝播一段视频」—— 这正是「不像实况图、像视频」的原因。
+        所以调用方通常传「时长中点」。
+        """
+        if not self._ffmpeg or not os.path.isfile(self._ffmpeg):
+            return {"ok": False, "error": "这一端没有可用的 ffmpeg"}
+        if not os.path.isfile(video):
+            return {"ok": False, "error": "视频文件不在了"}
+        # -ss 放在 -i 前面 = 快速定位（定位到该时间点之后最近的关键帧，
+        # 不精确到毫秒，但封面本来就不要求逐帧精确）；
+        # -frames:v 1 只取一帧；-q:v 2 是 JPEG 质量（2 接近最高，体积仍可控）
+        cmd = [
+            self._ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-ss", f"{max(0.0, float(at_sec)):.3f}", "-i", video,
+            "-frames:v", "1", "-q:v", "2",
+            dst,
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=120)
+            if proc.returncode != 0 or not os.path.isfile(dst) or os.path.getsize(dst) == 0:
+                err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+                return {"ok": False, "error": err[-200:] or "抽帧失败"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"抽帧失败：{exc}"}
+        return {"ok": True, "error": ""}
+
     def _remux_video_md5(self, src: str, dst: str, stamp: str) -> None:
         """ffmpeg 无损重封装。dst 允许等于 src（原地改写）。失败抛异常、不留 dst。"""
         if not self._ffmpeg or not os.path.isfile(self._ffmpeg):
@@ -3960,6 +3993,17 @@ def get_md5(path: str) -> str:
 def edit_md5_to(src: str, dst: str) -> str:
     """另存副本式改写 MD5（原件全程不动），返回改前 / 改后的值。"""
     return json.dumps(_get().edit_file_md5_to(src, dst), ensure_ascii=False)
+
+
+def extract_cover(video: str, dst: str, at_sec: float = 0.0) -> str:
+    """从视频的 `at_sec` 秒处抽一帧当封面（实况图合成用），返回 JSON {ok, error}。
+
+    合成时通常传「时长中点」：手机实况的封面本来就落在视频中段，不看开头。
+    取首帧会让静图与视频第一帧完全重合，播放起来就是一段视频，没有实况感。
+    """
+    return json.dumps(
+        _get().extract_video_cover(video, dst, at_sec), ensure_ascii=False
+    )
 
 
 def parse_url(url: str) -> str:

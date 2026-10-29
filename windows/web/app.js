@@ -14,12 +14,15 @@ const PLATFORM_META = {
   'Instagram': { cls: 'pf-instagram', letter: 'I' },
   '小红书':     { cls: 'pf-xiaohongshu', letter: '红' },
   '微博':       { cls: 'pf-weibo',     letter: '微' },
+  '快手':       { cls: 'pf-kuaishou',  letter: '快' },
+  '微信公众号':  { cls: 'pf-wechat',    letter: '公' },
+  '微信视频号':  { cls: 'pf-channels',  letter: '视' },
   // 未识别平台的聚合入口。库里存的值是「其他」，只在界面上显示为「其他平台」，
   // 这样已有的历史记录不用做数据迁移。
   '其他':      { cls: 'pf-other',     letter: '·', label: '其他平台' },
 };
-// 顺序即切换栏的显示顺序；「其他」放最后，作为兜底聚合入口
-const PLATFORM_ORDER = ['YouTube', 'B站', '抖音', 'TikTok', 'X', 'Instagram', '小红书', '微博', '其他'];
+// 「其他」是兜底聚合入口，名字必须与 engine.detect_platform 的返回值一致
+// （排序规则见 platformsInUse）。
 
 function platformMeta(name) {
   return PLATFORM_META[name] || { cls: 'pf-other', letter: '·' };
@@ -192,6 +195,7 @@ async function callApi(method, ...args) {
  *    没有这层的话，会出现「页面开着旧代码、却对着新服务」这种最难排查的状态
  *    —— 服务停了网页不会自己关，旧标签页会一直留着。 */
 let buildAtLoad = '';
+let buildInfo = null;
 
 function syncBuild() {
   return callApi('get_build').then(b => {
@@ -202,6 +206,8 @@ function syncBuild() {
       return;
     }
     buildAtLoad = b.build;
+    buildInfo = b;
+    renderDiagnostics();
     if (!/\[[0-9a-f]{8}\]/.test(document.title)) {
       document.title = `${document.title} [${b.build}]`;
     }
@@ -219,7 +225,52 @@ const state = {
   expandedId: null,
   defaults: null,
   busy: false,
+  // 最近一次解析结果：翻图集时用它，避免只靠 DOM 里的字段拼不回来
+  lastResult: null,
+  // 当前选中的档位下标（0 = 最高档）；换一条作品时重置
+  tierIndex: 0,
+  // 结构化设置（含「下载时自动改 MD5」与 ffmpeg 状态）
+  settings: null,
+  // 反馈邮箱（后端下发）
+  feedbackMail: '',
 };
+
+/* ==================== 外观 ====================
+ * 三档：浅色 / 深色 / 跟随系统。统一由 JS 解析成 data-theme 再套 CSS 变量，
+ * 避免「系统媒体查询」与「手动选择」两套规则打架。
+ */
+const THEME_KEY = 'yd_theme';
+
+function themeMode() {
+  try { return localStorage.getItem(THEME_KEY) || 'system'; } catch { return 'system'; }
+}
+
+function systemPrefersDark() {
+  return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+}
+
+function applyTheme(mode) {
+  const dark = mode === 'dark' || (mode === 'system' && systemPrefersDark());
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  document.documentElement.dataset.themeMode = mode;
+  document.querySelectorAll('#theme-row .chip').forEach(b => {
+    b.classList.toggle('is-active', b.dataset.themeMode === mode);
+  });
+}
+
+function setThemeMode(mode) {
+  try { localStorage.setItem(THEME_KEY, mode); } catch { /* 隐私模式忽略 */ }
+  applyTheme(mode);
+}
+
+function initTheme() {
+  applyTheme(themeMode());
+  if (!window.matchMedia) return;
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  const onChange = () => { if (themeMode() === 'system') applyTheme('system'); };
+  if (mq.addEventListener) mq.addEventListener('change', onChange);
+  else if (mq.addListener) mq.addListener(onChange);
+}
 
 /* ==================== 视图切换 ==================== */
 function switchView(name) {
@@ -229,21 +280,33 @@ function switchView(name) {
   document.querySelectorAll('.view').forEach(v => {
     v.classList.toggle('is-active', v.dataset.view === name);
   });
+  // MD5 页是「我已经下过什么」的视图：切进来才刷一次，不必开机白读
+  if (name === 'md5') loadMd5Downloads();
 }
 
 /* ==================== 平台切换栏 ==================== */
+function platformCounts() {
+  const counts = {};
+  state.history.forEach(h => {
+    counts[h.platform] = (counts[h.platform] || 0) + 1;
+  });
+  return counts;
+}
+
+/* 顺序与安卓端一致：记录条数多的排前面，条数相同按平台名；「其他」是兜底桶，
+ * 无论有没有记录都固定在最后 —— 它不是一个平台，排前面会让人误以为常用。 */
 function platformsInUse() {
-  const set = new Set(state.history.map(h => h.platform));
-  const known = PLATFORM_ORDER.filter(p => set.has(p));
-  const rest = [...set].filter(p => !PLATFORM_ORDER.includes(p)).sort();
-  return [...known, ...rest];
+  const counts = platformCounts();
+  const list = Object.keys(counts)
+    .filter(p => p !== '其他')
+    .sort((a, b) => (counts[b] - counts[a]) || a.localeCompare(b, 'zh'));
+  return list.concat('其他');
 }
 
 function renderTabs() {
   const box = $('#platform-tabs');
-  const list = platformsInUse();
 
-  if (!list.length) {
+  if (!state.history.length) {
     box.innerHTML = '';
     box.classList.add('is-hidden');
     state.platform = null;
@@ -251,10 +314,17 @@ function renderTabs() {
   }
   box.classList.remove('is-hidden');
 
-  if (!list.includes(state.platform)) state.platform = list[0];
+  const list = platformsInUse();
+  if (state.platform && !list.includes(state.platform)) state.platform = null;
+  const counts = platformCounts();
 
-  box.innerHTML = list.map(p => {
-    const count = state.history.filter(h => h.platform === p).length;
+  const allTab = `<button class="tab${state.platform === null ? ' is-active' : ''}" data-platform="" type="button">
+      <span>全部</span>
+      <span class="tab-badge">${state.history.length}</span>
+    </button>`;
+
+  box.innerHTML = allTab + list.map(p => {
+    const count = counts[p] || 0;
     const meta = platformMeta(p);
     return `<button class="tab${p === state.platform ? ' is-active' : ''}" data-platform="${esc(p)}" type="button">
       <span class="pf-icon ${meta.cls}">${brandIcon(p)}</span>
@@ -267,7 +337,8 @@ function renderTabs() {
 function onPlatformTabClick(e) {
   const tab = e.target.closest('.tab');
   if (!tab) return;
-  const next = tab.dataset.platform;
+  // 空字符串表示「全部」——与 state.platform = null 对应
+  const next = tab.dataset.platform || null;
   if (next === state.platform) return;
   state.platform = next;
   state.expandedId = null;
@@ -275,29 +346,171 @@ function onPlatformTabClick(e) {
   renderHistory();
 }
 
-/* ==================== 播放区 ====================
- * 未点之前只显示「封面 + 播放按钮」，点了才把封面换成播放器。
- * 这样不会一进来就黑屏转圈，也符合「封面在那儿等你看」的直觉。
- */
+/* 本地产物走 /file（后端只放行输出目录内、或历史库里记过的路径）。
+ * 在线直链仍走 /media 代理：CDN 会校验 Referer，浏览器直连会 403。 */
+function localUrl(path) {
+  if (!path) return '';
+  return `/file?t=${encodeURIComponent(TOKEN)}&p=${encodeURIComponent(path)}`;
+}
+
+/** 播放源：本地文件优先于在线直链（直链带时效，本地文件一直在）。
+ *  与安卓端 Video.playSource 同一套判定。 */
+function playSourceOf(item) {
+  if (item.content_type === 'images' || item.content_type === 'live') return '';
+  if (item.local_path) return localUrl(item.local_path);
+  if (item.resolved_url && item.play_kind === 'progressive') {
+    return proxied(item.resolved_url, item.source_url);
+  }
+  return '';
+}
+
 function renderPlayerBlock(item) {
-  if (!item.resolved_url) {
+  const src = playSourceOf(item);
+  if (!src) {
     const msg = item.play_kind === 'none'
       ? '该平台是「视频 + 音频」分离流，没有可直接播放的链接 —— 请点「下载到本地」，下载完就能播。'
       : '直链已失效，请点「重新解析」获取新直链。';
     return `<div class="player-frame player-empty">${msg}</div>`;
   }
 
-  const src = proxied(item.resolved_url, item.source_url);
+  const isLocal = !!item.local_path;
   const poster = item.thumbnail ? proxied(item.thumbnail, item.source_url) : '';
   const posterAttr = poster ? ` poster="${esc(poster)}"` : '';
 
   return `
-    <div class="player-frame player-box" data-source="${esc(item.source_url || '')}">
+    <div class="player-frame player-box" data-source="${esc(item.source_url || '')}" data-local="${isLocal ? '1' : '0'}">
       ${poster ? `<img class="player-poster" src="${esc(poster)}" alt="封面">` : ''}
       <button class="player-play" data-act="play-inline" type="button" title="播放">${ICONS.playBig}</button>
       <video class="player-video is-hidden" controls preload="none" src="${esc(src)}"${posterAttr}></video>
       <div class="player-error is-hidden">播放失败。</div>
     </div>`;
+}
+
+/* ==================== 图文 / 图集 / 实况图 ====================
+ * 这类内容是一组媒体地址（media_json），没有单一「直链」，所以不显示播放器，
+ * 改成逐张翻页。实况图多出来的「动」那一段在下载时按同名 .mp4 一起落盘。
+ */
+function isGallery(item) {
+  return item.content_type === 'images' || item.content_type === 'live';
+}
+
+function mediaListOf(item) {
+  if (!item || !item.media_json) return [];
+  try {
+    const arr = JSON.parse(item.media_json);
+    return Array.isArray(arr) ? arr.filter(m => m && m.url) : [];
+  } catch {
+    return [];
+  }
+}
+
+function renderGallery(item, page) {
+  const media = mediaListOf(item);
+  if (!media.length) {
+    return `<div class="player-frame player-empty">这条作品的媒体地址为空，请重新解析。</div>`;
+  }
+  page = Math.max(0, Math.min(page || 0, media.length - 1));
+  const m = media[page];
+  const isVideo = (m.kind || 'image') === 'video';
+  const src = proxied(m.url, item.source_url);
+  return `<div class="gallery" data-page="${page}">
+    <div class="gallery-stage">
+      ${isVideo
+        ? `<video class="gallery-video" controls preload="none" src="${esc(src)}"></video>`
+        : `<img class="gallery-image" src="${esc(src)}" alt="第 ${page + 1} 张">`}
+      <span class="gallery-count">${page + 1} / ${media.length}</span>
+      ${m.live ? '<span class="gallery-live">实况</span>' : ''}
+    </div>
+    <div class="gallery-bar">
+      <button class="btn btn-ghost btn-sm" data-act="gallery-prev" type="button">上一张</button>
+      <span class="gallery-hint">${item.content_type === 'live'
+        ? '实况图：下载时另存同名的 .mp4' : '图集'}</span>
+      <button class="btn btn-ghost btn-sm" data-act="gallery-next" type="button">下一张</button>
+    </div>
+  </div>`;
+}
+
+/** 翻页：只替换这一块 DOM，不重绘整张卡片（否则正文展开状态会被重置）。 */
+function navigateGallery(hit, dir) {
+  const gallery = hit.closest('.gallery');
+  if (!gallery) return;
+  const host = hit.closest('.result') || hit.closest('.history-item');
+  if (!host) return;
+
+  const isParse = host.classList.contains('result');
+  const item = isParse ? state.lastResult : state.history.find(h => h.id === host.dataset.id);
+  if (!item) return;
+
+  const media = mediaListOf(item);
+  if (!media.length) return;
+  const page = Number(gallery.dataset.page) || 0;
+  const next = (page + dir + media.length) % media.length;
+  gallery.outerHTML = renderGallery(item, next);
+
+  // 「下载第 N 张」上的数字跟着翻页走
+  const cp = host.querySelector('.cur-page');
+  if (cp) cp.textContent = String(next + 1);
+}
+
+/** 当前翻到第几张（1 起），用于「下载第 N 张」。 */
+function currentGalleryPage(hit) {
+  const gallery = hit.closest('.gallery');
+  return gallery ? (Number(gallery.dataset.page) || 0) + 1 : 1;
+}
+
+/* ==================== 档位 ====================
+ * 引擎已经把档位按「好 → 差」排好，第一项就是默认的最高档，界面不再算一遍。
+ * 直链型档位带 url、DASH 型档位带 selector，两种都原样交给后端。
+ */
+function tiersOf(item) {
+  return (item && Array.isArray(item.tiers)) ? item.tiers : [];
+}
+
+function currentTier() {
+  const tiers = tiersOf(state.lastResult);
+  if (!tiers.length) return null;
+  return tiers[Math.min(Math.max(state.tierIndex, 0), tiers.length - 1)];
+}
+
+function tierSpec(tier) {
+  if (!tier) return '';
+  const o = {};
+  if (tier.url) o.url = tier.url;
+  if (tier.selector) o.selector = tier.selector;
+  return JSON.stringify(o);
+}
+
+function md5TextFor(info, tier) {
+  const hash = (tier && tier.hash) || (info && info.source_md5) || '';
+  return hash ? `MD5（平台自报）：${hash}` : 'MD5：下载完成后计算';
+}
+
+function onResultChange(e) {
+  if (e.target.id === 'result-rewrite') {
+    const on = !!e.target.checked;
+    callApi('set_rewrite_md5', on).then(s => {
+      if (s && !s.error) state.settings = s;
+      const cb = $('#rewrite-md5');
+      if (cb) cb.checked = on;
+    });
+    return;
+  }
+  const sel = e.target.closest('#tier-select');
+  if (!sel) return;
+  state.tierIndex = Number(sel.value) || 0;
+  const line = $('#result-md5');
+  if (line) line.textContent = md5TextFor(state.lastResult, currentTier());
+}
+
+function contentTypeHint(item) {
+  if (item.content_type === 'preview') {
+    return '视频号内容由微信客户端加密分发，本应用无法直接下载' +
+      '（微信内一般也没有「保存视频」入口）。';
+  }
+  if (item.content_type === 'text') {
+    return '这篇公众号是纯文字，没有可下载的图片或视频；正文可以直接复制。';
+  }
+  return '';
 }
 
 /* 装一个「卡死」兜底计时器：部分编码（H.265 / AV1）浏览器解不了，
@@ -322,6 +535,14 @@ async function recoverPlay(box, reason) {
   const err = box.querySelector('.player-error');
   if (!video || !err) return;
   clearTimeout(video._stallTimer);
+
+  // 播的是本地产物时不要自动重解析：重解析只会刷新在线直链，救不了本地文件
+  if (box.dataset.local === '1') {
+    video.classList.add('is-hidden');
+    err.textContent = `${reason} 本地文件可能已被移动或删除，请刷新页面后重试。`;
+    err.classList.remove('is-hidden');
+    return;
+  }
 
   if (box.dataset.retried === '1') {
     video.classList.add('is-hidden');
@@ -374,12 +595,24 @@ function handlePlayInline(btn) {
 }
 
 /* ==================== 历史列表 ==================== */
+/** 展开态的一行「标签 值」。标签定宽，值可换行 —— 长链接不会把布局撑破。 */
+function detailLine(label, value) {
+  if (!value) return '';
+  return `<div class="detail-line">
+    <span class="detail-label">${esc(label)}</span>
+    <span class="detail-value">${esc(value)}</span>
+  </div>`;
+}
+
 function renderItem(item) {
   const meta = platformMeta(item.platform);
   const open = state.expandedId === item.id;
+  const hasLocal = !!item.local_path;
 
-  const sub = [item.uploader, item.uploader_id, formatDuration(item.duration), formatTime(item.resolved_at)]
-    .filter(Boolean).map(esc).join(' · ');
+  // 折叠态：标题 + 「时间 · 已下载」。作者/账号/时长都收进展开态，
+  // 与安卓端一致（安卓是因为屏窄，桌面端则是为了让一屏能多放几条）。
+  const subText = [formatTime(item.resolved_at), hasLocal ? '已下载' : '']
+    .filter(Boolean).join(' · ');
 
   // 折叠态就给出操作小图标，不必展开即可操作
   const ops = `
@@ -389,20 +622,28 @@ function renderItem(item) {
     <button class="icon-btn" data-act="download"  data-id="${esc(item.id)}" title="下载" type="button">${ICONS.download}</button>
     <button class="icon-btn is-danger" data-act="delete" data-id="${esc(item.id)}" title="删除" type="button">${ICONS.del}</button>`;
 
-  // 展开态：向下扩出播放预览区
-  const player = renderPlayerBlock(item);
+  const fields = [
+    detailLine('作者', item.uploader),
+    detailLine('账号 ID', item.uploader_id),
+    detailLine('时长', item.duration ? formatDuration(item.duration) : ''),
+    detailLine('原始链接', item.source_url),
+    detailLine('本地文件', hasLocal ? '已下载' : ''),
+  ].join('');
 
-  // 播放按钮始终显示：能不能播由点击后的提示说明，避免「按钮时有时无」造成困惑
-  const detailActions = `
-    <button class="btn btn-primary" data-act="play" data-id="${esc(item.id)}" type="button">播放</button>
-    <button class="btn btn-ghost" data-act="download" data-id="${esc(item.id)}" type="button">下载到本地</button>
-    <button class="btn btn-ghost" data-act="reanalyze" data-id="${esc(item.id)}" type="button">重新解析</button>`;
+  const gallery = isGallery(item);
+  const hint = contentTypeHint(item);
+  const canDownload = !hint;
 
   const detail = open ? `
     <div class="history-detail">
-      ${player}
-      <div class="history-detail-actions">${detailActions}</div>
-      <p class="detail-note">原始链接：${esc(item.source_url)}</p>
+      ${gallery ? renderGallery(item, 0) : (hint ? '' : renderPlayerBlock(item))}
+      <div class="detail-fields">${fields}</div>
+      ${hint ? `<p class="detail-note">${esc(hint)}</p>` : ''}
+      <div class="history-detail-actions">
+        ${canDownload ? `<button class="btn btn-primary" data-act="download" data-id="${esc(item.id)}" type="button">${gallery ? '下载全部' : '下载到本地'}</button>` : ''}
+        ${canDownload && gallery ? `<button class="btn btn-ghost" data-act="download-page" data-id="${esc(item.id)}" type="button">下载第 <span class="cur-page">1</span> 张</button>` : ''}
+        <button class="btn btn-ghost" data-act="open-source" data-id="${esc(item.id)}" type="button">打开原视频</button>
+      </div>
     </div>` : '';
 
   return `
@@ -411,7 +652,7 @@ function renderItem(item) {
       <span class="pf-icon ${meta.cls}">${brandIcon(item.platform)}</span>
       <div class="history-main">
         <p class="history-title">${esc(item.title || '未命名')}</p>
-        <p class="history-sub">${sub}</p>
+        <p class="history-sub${hasLocal ? ' is-local' : ''}">${esc(subText)}</p>
       </div>
       <div class="history-ops">${ops}</div>
     </div>
@@ -421,11 +662,14 @@ function renderItem(item) {
 
 function renderHistory() {
   const box = $('#history-list');
-  if (!state.platform) {
+  if (!state.history.length) {
     box.innerHTML = `<div class="history-empty">还没有解析记录，去「解析」页粘贴一个链接试试</div>`;
     return;
   }
-  const items = state.history.filter(h => h.platform === state.platform);
+  // state.platform 为 null 表示「全部」
+  const items = state.platform
+    ? state.history.filter(h => h.platform === state.platform)
+    : state.history;
   if (!items.length) {
     box.innerHTML = `<div class="history-empty">该平台还没有记录</div>`;
     return;
@@ -436,13 +680,20 @@ function renderHistory() {
 function renderHistoryAll() {
   renderTabs();
   renderHistory();
+
+  // 「清空该平台」只在选了某个平台时才有意义；「全部」下只留「全部清空」
+  const cb = $('#clear-platform-btn');
+  if (cb) {
+    cb.classList.toggle('is-hidden', state.platform === null);
+    if (state.platform) cb.textContent = `清空「${state.platform}」`;
+  }
 }
 
 /* ==================== 解析结果卡片 ==================== */
 function renderResult(info) {
   const box = $('#parse-result');
+  const meta = platformMeta(info.platform);
   const bits = [
-    info.platform,
     formatDuration(info.duration),
     info.quality,
     info.filesize,
@@ -454,19 +705,95 @@ function renderResult(info) {
     ? `<a href="${esc(info.source_url)}" target="_blank" rel="noreferrer">${esc(info.title || '未命名')}</a>`
     : esc(info.title || '未命名');
 
-  // 竖向布局：信息在上，播放框在下面占满整行
+  // 走备用链路时说一句，否则用户不理解为什么慢 / 偶尔失败
+  const viaText = info.via === 'browser' ? '浏览器模式'
+    : info.via === 'service' ? '第三方服务' : '';
+  const via = viaText ? `<span class="result-via">· ${viaText}</span>` : '';
+
+  // 正文（公众号文章 / 微博正文等）：默认折 4 行，长文不把下载按钮顶出屏幕
+  const desc = info.description
+    ? `<div class="result-desc">
+         <p class="desc-text" id="desc-text">${esc(info.description)}</p>
+         <div class="desc-actions">
+           <button class="link-btn" data-act="toggle-desc" type="button">展开</button>
+           <button class="link-btn" data-act="copy-desc" type="button">复制正文</button>
+         </div>
+       </div>`
+    : '';
+
+  // 竖向布局：信息在上，播放/图集在下面占满整行
+  const gallery = isGallery(info);
+  const hint = contentTypeHint(info);
+  const tiers = tiersOf(info);
+  // 换一条作品要回到默认的最高档，不能把上一条的选择带过来
+  state.tierIndex = 0;
+
   box.innerHTML = `
     <div class="result-head">
+      <div class="result-line">
+        <span class="pf-icon ${meta.cls}">${brandIcon(info.platform)}</span>
+        <span class="result-platform">${esc(info.platform || '')}</span>
+        ${via}
+      </div>
       <h3 class="result-title">${title}</h3>
-      <p class="result-meta">${bits}</p>
+      ${bits ? `<p class="result-meta">${bits}</p>` : ''}
     </div>
-    <div class="result-media">${renderPlayerBlock(info)}</div>
+    ${desc}
+    <div class="result-media">${hint ? '' : (gallery ? renderGallery(info, 0) : renderPlayerBlock(info))}</div>
+    ${hint ? `<p class="result-note">${esc(hint)}</p>` : ''}
+    ${(!hint && !gallery) ? `<div class="rewrite-row">
+      <label class="switch-row">
+        <input type="checkbox" id="result-rewrite" ${state.settings && state.settings.rewrite_md5_on_download ? 'checked' : ''}>
+        <span>下载时自动改 MD5</span>
+      </label>
+      <span class="rewrite-hint">开启后下载完用 ffmpeg 无损重封装，换一个 MD5</span>
+    </div>` : ''}
+    ${(!hint && !gallery) ? `<p class="result-md5" id="result-md5">${esc(md5TextFor(info, tiers[0]))}</p>` : ''}
     <div class="result-actions">
-      <button class="btn btn-primary" data-act="download-selected" type="button">下 载</button>
+      ${hint ? '' : `<button class="btn btn-primary" data-act="download-selected" type="button">${gallery ? '下载全部' : '下 载'}</button>`}
+      ${hint || !gallery ? '' : `<button class="btn btn-ghost" data-act="download-page" type="button">下载第 <span class="cur-page">1</span> 张</button>`}
+      ${(!hint && tiers.length > 1) ? `<select id="tier-select" class="tier-select" title="选择下载档位">
+        ${tiers.map((t, i) => `<option value="${i}">${esc(t.label)}</option>`).join('')}
+      </select>` : ''}
       <button class="btn btn-ghost"   data-act="copy-selected" type="button">复制链接</button>
+      <button class="btn btn-ghost"   data-act="open-selected" type="button">打开原视频</button>
     </div>`;
   box.classList.remove('is-hidden');
   box.dataset.sourceUrl = info.source_url || '';
+  state.lastResult = info;
+  syncClearButton();
+}
+
+/* ---- 解析中 / 失败卡片 ---- */
+function renderParseLoading(hint, elapsed) {
+  const box = $('#parse-result');
+  box.innerHTML = `
+    <div class="parse-loading">
+      <span class="spinner"></span>
+      <div class="parse-loading-main">
+        <p class="loading-hint">${esc(hint || '正在解析…')}</p>
+        <p class="loading-sub">已等待 ${elapsed} 秒${
+          hint && (hint.includes('引擎') || hint.includes('第三方'))
+            ? ' · 境外站点可能要几十秒，卡住多半是 VPN 没开' : ''
+        }</p>
+      </div>
+      <button class="btn btn-ghost btn-sm" data-act="cancel-parse" type="button">取消</button>
+    </div>`;
+  box.classList.remove('is-hidden');
+  box.dataset.sourceUrl = '';
+  syncClearButton();
+}
+
+function renderParseError(msg) {
+  const box = $('#parse-result');
+  box.innerHTML = `
+    <div class="result-head">
+      <h3 class="result-title">解析失败</h3>
+      <p class="result-error">${esc(msg)}</p>
+    </div>`;
+  box.classList.remove('is-hidden');
+  box.dataset.sourceUrl = '';
+  syncClearButton();
 }
 
 /* ==================== 交互：解析 ==================== */
@@ -487,6 +814,65 @@ async function onPaste() {
   input.focus();
 }
 
+/* 解析改成任务式：start_parse 立即返回，界面按 phase/hint 显示阶段。
+ * 之前是一个阻塞 30 秒的 POST，界面只能显示「解析中…」，既看不到进度，
+ * 也没有取消的出口。 */
+let parseTimer = null;
+let parseStartedAt = 0;
+
+function syncClearButton() {
+  const btn = $('#clear-parse-btn');
+  if (!btn) return;
+  const box = $('#parse-result');
+  btn.classList.toggle('is-hidden', box.classList.contains('is-hidden'));
+}
+
+function setParseBusy(busy) {
+  state.busy = busy;
+  const btn = $('#parse-btn');
+  btn.disabled = busy;
+  btn.textContent = busy ? '解析中…' : '解 析';
+  syncClearButton();
+}
+
+function stopParsePolling() {
+  if (parseTimer) {
+    clearTimeout(parseTimer);
+    parseTimer = null;
+  }
+}
+
+function pollParse() {
+  callApi('get_parse_state').then(st => {
+    if (!st || st.error) {
+      stopParsePolling();
+      setParseBusy(false);
+      renderParseError((st && st.error) || '无法读取解析状态');
+      return;
+    }
+    const elapsed = Math.max(0, Math.round((Date.now() - parseStartedAt) / 1000));
+
+    if (st.state === 'running') {
+      renderParseLoading(st.hint, elapsed);
+      parseTimer = setTimeout(pollParse, 350);
+      return;
+    }
+
+    stopParsePolling();
+    setParseBusy(false);
+
+    if (st.state === 'done' && st.result && st.result.ok) {
+      renderResult(st.result);
+      refreshHistory();
+    } else if (st.state === 'cancelled') {
+      $('#parse-result').classList.add('is-hidden');
+      $('#clear-parse-btn').classList.add('is-hidden');
+    } else {
+      renderParseError((st && st.error) || '无法解析，请稍后重试。');
+    }
+  });
+}
+
 async function onParse() {
   if (state.busy) return;
 
@@ -494,31 +880,33 @@ async function onParse() {
   const url = extractUrl(raw);
   if (!url) { alert('没有识别到有效链接，请检查输入内容。'); return; }
 
-  const btn = $('#parse-btn');
-  state.busy = true;
-  btn.disabled = true;
-  btn.textContent = '解析中…';
+  setParseBusy(true);
+  parseStartedAt = Date.now();
+  renderParseLoading('正在识别链接…', 0);
 
-  try {
-    const info = await callApi('parse_url', url);
-    if (info && info.ok) {
-      renderResult(info);
-      await refreshHistory();
-    } else {
-      const msg = (info && info.error) || '无法解析，请稍后重试。';
-      // 报错里可能带换行（说明 + 原始报错），用 pre-line 保留
-      $('#parse-result').innerHTML = `
-        <div class="result-head">
-          <h3 class="result-title">解析失败</h3>
-          <p class="result-error">${esc(msg)}</p>
-        </div>`;
-      $('#parse-result').classList.remove('is-hidden');
-    }
-  } finally {
-    state.busy = false;
-    btn.disabled = false;
-    btn.textContent = '解 析';
+  const res = await callApi('start_parse', url);
+  if (!res || res.error || res.ok === false) {
+    setParseBusy(false);
+    renderParseError((res && res.error) || '无法启动解析');
+    return;
   }
+  pollParse();
+}
+
+async function onCancelParse() {
+  stopParsePolling();
+  await callApi('cancel_parse');
+  setParseBusy(false);
+  $('#parse-result').classList.add('is-hidden');
+  $('#clear-parse-btn').classList.add('is-hidden');
+}
+
+function onClearParse() {
+  stopParsePolling();
+  setParseBusy(false);
+  $('#parse-result').classList.add('is-hidden');
+  $('#parse-result').innerHTML = '';
+  $('#clear-parse-btn').classList.add('is-hidden');
 }
 
 /* ==================== 交互：历史项 ==================== */
@@ -530,6 +918,9 @@ async function onHistoryClick(e) {
 
   // 封面上的播放按钮只需操作 DOM，不依赖记录数据
   if (act === 'play-inline') { handlePlayInline(hit); return; }
+  // 图集翻页同理：按钮在展开区里，用所在卡片反查记录即可
+  if (act === 'gallery-prev') { navigateGallery(hit, -1); return; }
+  if (act === 'gallery-next') { navigateGallery(hit, 1); return; }
 
   const id = hit.dataset.id;
   const item = state.history.find(h => h.id === id);
@@ -551,12 +942,19 @@ async function onHistoryClick(e) {
     case 'play':
       state.expandedId = id;
       renderHistory();
-      // 直链带时效；部分平台（B站/YouTube 高清）只有分离流，本就没有可播链接
-      if (!item.resolved_url) {
+      // 图文/图集没有播放器，「播放」就是展开看图
+      if (isGallery(item)) break;
+      // 直链带时效；部分平台（B站/YouTube 高清）只有分离流，本就没有可播链接。
+      // 本地文件优先（下过就能播，不受直链过期影响）。
+      if (!playSourceOf(item)) {
         alert(item.play_kind === 'none'
           ? '该平台是「视频 + 音频」分离流，没有可直接播放的链接，请先下载到本地。'
           : '直链已失效，请先点「重新解析」。');
       }
+      break;
+
+    case 'open-source':
+      if (item.source_url) window.open(item.source_url, '_blank', 'noreferrer');
       break;
 
     case 'reanalyze':
@@ -564,7 +962,11 @@ async function onHistoryClick(e) {
       break;
 
     case 'download':
-      startDownload(item.source_url, item.title || '正在准备下载…');
+      startDownload(item.source_url, item.title, 0);
+      break;
+
+    case 'download-page':
+      startDownload(item.source_url, item.title, currentGalleryPage(hit));
       break;
 
     case 'delete':
@@ -607,39 +1009,42 @@ function flash(el, text) {
 let dlPath = '';
 let dlTimer = null;
 let dlLastSeq = -1;
+let dlBaseSeq = 0;         // 本次任务开始前的序号，用于判定「新的一次结束」
 let dlSawActive = false;   // 是否已经看到「正在下载」状态
 
-function startDownload(url, label) {
+async function startDownload(url, label, index = 0, spec = '') {
   if (!url) { alert('没有可下载的链接。'); return; }
 
   const bar = $('#dl-bar');
+  const fill = $('#dl-fill');
   dlPath = '';
   bar.classList.remove('is-error', 'is-done');
   $('#dl-label').textContent = label ? `正在准备下载：${label}` : '正在准备下载…';
   $('#dl-stat').textContent = '准备中';
   // 还没拿到百分比之前先走「不确定态」，避免空条看起来像卡死
-  const fill = $('#dl-fill');
   fill.style.width = '';
   fill.classList.add('is-indeterminate');
   $('#dl-open').classList.add('is-hidden');
   $('#dl-close').classList.add('is-hidden');
   bar.classList.remove('is-hidden');
 
-  // 必须先发起下载、再开始轮询。
-  // 反过来的话，第一次轮询会读到「上一次任务」的结束状态：
-  // 界面会显示上一条的完成信息，并且立刻停止轮询 —— 新任务就永远不显示了。
-  callApi('start_download', url).then(res => {
-    if (res && res.ok === false) {
-      bar.classList.add('is-error');
-      $('#dl-label').textContent = res.error || '无法启动下载';
-      $('#dl-close').classList.remove('is-hidden');
-      return;
-    }
-    stopPolling();          // 清掉可能残留的旧循环，避免两个循环抢着渲染
-    dlSawActive = false;
-    dlLastSeq = -1;
-    pollDownload();
-  });
+  // 先记下当前序号，再发起下载：这样能分清「本次任务的完成」与「上一次留下的完成」。
+  // 只靠「见过 active=true」是不够的 —— 短任务（图集只有一张图）两次轮询之间就跑完了，
+  // 界面从头到尾看不到 active，轮询会永远停不下来（安卓端踩过同一个坑）。
+  const before = await callApi('get_download_state');
+  dlBaseSeq = (before && typeof before.seq === 'number') ? before.seq : 0;
+
+  const res = await callApi('start_download', url, index || 0, spec || '');
+  if (res && res.ok === false) {
+    bar.classList.add('is-error');
+    $('#dl-label').textContent = res.error || '无法启动下载';
+    $('#dl-close').classList.remove('is-hidden');
+    return;
+  }
+  stopPolling();          // 清掉可能残留的旧循环，避免两个循环抢着渲染
+  dlSawActive = false;
+  dlLastSeq = dlBaseSeq;
+  pollDownload();
 }
 
 function stopPolling() {
@@ -656,9 +1061,8 @@ function pollDownload() {
       if (st.active) dlSawActive = true;
       renderDownloadState(st);
     }
-    // 只有「见过 active=true」之后才能判定任务结束，
-    // 否则会把上一次的结束状态误当成本次的结束。
-    if (st && st.active === false && dlSawActive) {
+    // 结束判定：见过 active，或出现了比基线更新的序号（短任务也能收住）
+    if (st && st.active === false && (dlSawActive || (st.seq || 0) > dlBaseSeq)) {
       stopPolling();
       return;
     }
@@ -666,29 +1070,60 @@ function pollDownload() {
   });
 }
 
+/* 速度/剩余时间都用数值字段，不再解析 "12.3%|1.2MiB/s|00:05" 那种字符串 */
+function formatSpeed(bytesPerSec) {
+  const v = Number(bytesPerSec) || 0;
+  if (v <= 0) return '';
+  if (v >= 1024 * 1024) return `${(v / 1024 / 1024).toFixed(1)} MB/s`;
+  return `${Math.round(v / 1024)} KB/s`;
+}
+
+function formatEta(seconds) {
+  const s = Number(seconds);
+  if (!Number.isFinite(s) || s <= 0) return '';
+  const p = n => String(n).padStart(2, '0');
+  return s >= 3600
+    ? `${Math.floor(s / 3600)}:${p(Math.floor((s % 3600) / 60))}:${p(s % 60)}`
+    : `${p(Math.floor(s / 60))}:${p(s % 60)}`;
+}
+
 function renderDownloadState(st) {
   const bar = $('#dl-bar');
   bar.classList.remove('is-hidden');
 
   if (st.type === 'progress') {
-    const [pct = '', speed = '', eta = ''] = String(st.value || '').split('|');
-    const p = parseFloat(pct) || 0;
-    if (p > 0) $('#dl-fill').classList.remove('is-indeterminate');
-    $('#dl-fill').style.width = `${Math.max(0, Math.min(100, p))}%`;
+    const p = Number(st.percent);
+    if (Number.isFinite(p)) {
+      $('#dl-fill').classList.remove('is-indeterminate');
+      $('#dl-fill').style.width = `${Math.max(0, Math.min(100, p))}%`;
+    } else {
+      $('#dl-fill').classList.add('is-indeterminate');
+      $('#dl-fill').style.width = '';
+    }
     $('#dl-stat').textContent = [
-      pct.trim(),
-      speed.trim(),
-      eta.trim() ? `剩余 ${eta.trim()}` : '',
+      Number.isFinite(p) ? `${p.toFixed(1)}%` : '',
+      formatSpeed(st.speed),
+      formatEta(st.eta) ? `剩余 ${formatEta(st.eta)}` : '',
     ].filter(Boolean).join('   ');
     $('#dl-label').textContent = '正在下载…';
+    $('#dl-close').classList.remove('is-hidden');
+
+  } else if (st.type === 'processing') {
+    // 音视频合流阶段没有百分比，显示成不确定态而不是停在 100%
+    bar.classList.remove('is-done', 'is-error');
+    $('#dl-fill').classList.add('is-indeterminate');
+    $('#dl-fill').style.width = '';
+    $('#dl-label').textContent = '正在合并音视频…';
+    $('#dl-stat').textContent = '';
     $('#dl-close').classList.remove('is-hidden');
 
   } else if (st.type === 'done') {
     dlPath = st.path || '';
     bar.classList.add('is-done');
+    bar.classList.remove('is-error');
     $('#dl-fill').classList.remove('is-indeterminate');
     $('#dl-fill').style.width = '100%';
-    $('#dl-stat').textContent = '';
+    $('#dl-stat').textContent = st.md5 ? `MD5：${st.md5}` : '';
     $('#dl-label').textContent = `下载完成：${dlPath.split(/[\\/]/).pop() || ''}`;
     $('#dl-open').classList.remove('is-hidden');
     $('#dl-close').classList.remove('is-hidden');
@@ -696,8 +1131,17 @@ function renderDownloadState(st) {
 
   } else if (st.type === 'error') {
     bar.classList.add('is-error');
+    bar.classList.remove('is-done');
     $('#dl-fill').classList.remove('is-indeterminate');
     $('#dl-label').textContent = String(st.message || '下载出错').slice(0, 240);
+    $('#dl-stat').textContent = '';
+    $('#dl-close').classList.remove('is-hidden');
+
+  } else if (st.type === 'starting') {
+    bar.classList.remove('is-done', 'is-error');
+    $('#dl-fill').classList.add('is-indeterminate');
+    $('#dl-fill').style.width = '';
+    $('#dl-label').textContent = '正在准备下载…';
     $('#dl-stat').textContent = '';
     $('#dl-close').classList.remove('is-hidden');
   }
@@ -707,17 +1151,46 @@ function renderDownloadState(st) {
 async function onResultClick(e) {
   const hit = e.target.closest('[data-act]');
   if (!hit) return;
-  if (hit.dataset.act === 'play-inline') { handlePlayInline(hit); return; }
+  const act = hit.dataset.act;
+
+  if (act === 'play-inline') { handlePlayInline(hit); return; }
+  if (act === 'cancel-parse') { onCancelParse(); return; }
+  if (act === 'gallery-prev') { navigateGallery(hit, -1); return; }
+  if (act === 'gallery-next') { navigateGallery(hit, 1); return; }
+
+  if (act === 'toggle-desc') {
+    const p = $('#desc-text');
+    if (p) {
+      const expanded = p.classList.toggle('is-expanded');
+      hit.textContent = expanded ? '收起' : '展开';
+    }
+    return;
+  }
+
+  if (act === 'copy-desc') {
+    const p = $('#desc-text');
+    try {
+      await navigator.clipboard.writeText(p ? p.textContent : '');
+      flash(hit, '✓ 已复制');
+    } catch { alert('复制失败，请手动复制。'); }
+    return;
+  }
 
   const url = $('#parse-result').dataset.sourceUrl || '';
 
-  if (hit.dataset.act === 'download-selected') {
-    startDownload(url);   // 结果卡片上方已经显示标题，这里不用重复
-  } else if (hit.dataset.act === 'copy-selected') {
+  if (act === 'download-selected') {
+    startDownload(url, (state.lastResult && state.lastResult.title) || '', 0,
+                  tierSpec(currentTier()));
+  } else if (act === 'download-page') {
+    startDownload(url, (state.lastResult && state.lastResult.title) || '',
+                  currentGalleryPage(hit), tierSpec(currentTier()));
+  } else if (act === 'copy-selected') {
     try {
       await navigator.clipboard.writeText(url);
       flash(hit, '✓ 已复制');
     } catch { alert('复制失败，请手动复制。'); }
+  } else if (act === 'open-selected') {
+    if (url) window.open(url, '_blank', 'noreferrer');
   }
 }
 
@@ -763,6 +1236,76 @@ async function runConfirm() {
 }
 
 /* ==================== 设置 ==================== */
+function diagText() {
+  const s = state.settings || {};
+  const outDir = (state.defaults && state.defaults.download && state.defaults.download.output_dir)
+    || s.output_dir || '未设置';
+  return [
+    `版本指纹：${buildInfo ? buildInfo.build : '未知'}`,
+    `构建时间：${buildInfo ? new Date(buildInfo.mtime * 1000).toLocaleString() : '未知'}`,
+    `系统：${navigator.userAgent}`,
+    `保存路径：${outDir}`,
+    `ffmpeg：${s.ffmpeg_available ? s.ffmpeg_path : '未找到'}`,
+    `下载时自动改 MD5：${s.rewrite_md5_on_download ? '开' : '关'}`,
+  ].join('\n');
+}
+
+function renderDiagnostics() {
+  const b = $('#diag-build');
+  if (b) {
+    b.textContent = buildInfo
+      ? `版本指纹：${buildInfo.build}（${new Date(buildInfo.mtime * 1000).toLocaleString()}）`
+      : '版本指纹：读取中…';
+  }
+  const sys = $('#diag-system');
+  if (sys) sys.textContent = `系统：${navigator.userAgent}`;
+  const ff = $('#diag-ffmpeg');
+  if (ff) {
+    ff.textContent = state.settings
+      ? (state.settings.ffmpeg_available
+        ? `ffmpeg：${state.settings.ffmpeg_path}`
+        : 'ffmpeg：未找到（视频改 MD5 / 合流不可用）')
+      : 'ffmpeg：读取中…';
+  }
+  renderFeedbackMail();
+}
+
+function renderFeedbackMail() {
+  const el = $('#feedback-mail');
+  if (!el || !state.feedbackMail) return;
+  const subject = '[反馈] 视频解析下载（Windows）';
+  const body = `问题描述：\n\n\n---\n诊断信息：\n${diagText()}`;
+  el.href = `mailto:${state.feedbackMail}?subject=${encodeURIComponent(subject)}`
+    + `&body=${encodeURIComponent(body)}`;
+  el.textContent = '发送反馈邮件';
+}
+
+function updateCookieStatus(file, present) {
+  const s = $('#cookie-status');
+  if (s) s.textContent = present ? `已导入：${file}` : '未导入';
+  const cb = $('#clear-cookie-btn');
+  if (cb) cb.classList.toggle('is-hidden', !present);
+}
+
+function applySettings(st) {
+  state.settings = st;
+  updateCookieStatus(st.cookies_file || '', !!st.cookies_present);
+  const cb = $('#rewrite-md5');
+  if (cb) cb.checked = !!st.rewrite_md5_on_download;
+  const status = $('#ffmpeg-status');
+  if (status) {
+    status.textContent = st.ffmpeg_available
+      ? 'ffmpeg 已就绪，视频改 MD5 与音视频合流可用。'
+      : '没有找到 ffmpeg：视频改 MD5 不可用。请把 ffmpeg 放进 PATH，或配置 config/defaults.json 的 engine.ffmpeg_dir。';
+  }
+  renderDiagnostics();
+}
+
+async function refreshSettings() {
+  const st = await callApi('get_settings');
+  if (st && !st.error && typeof st === 'object') applySettings(st);
+}
+
 async function loadSettings() {
   const cfg = await callApi('get_defaults');
 
@@ -783,13 +1326,41 @@ async function loadSettings() {
     ckEl.placeholder = file ? '' : '未设置';
   }
 
+  // 结构化设置：Cookie 状态、自动改 MD5、ffmpeg、诊断信息
+  await refreshSettings();
+
   const mail = await callApi('get_feedback_mail');
   if (typeof mail === 'string' && mail) {
-    const mailEl = $('#feedback-mail');
-    if (mailEl) {
-      mailEl.href = `mailto:${mail}`;
-      mailEl.textContent = `发送邮件（${mail}）`;
-    }
+    state.feedbackMail = mail;
+    renderFeedbackMail();
+  }
+}
+
+async function onToggleRewrite() {
+  const cb = $('#rewrite-md5');
+  if (!cb) return;
+  const on = !!cb.checked;
+  const s = await callApi('set_rewrite_md5', on);
+  if (s && !s.error) {
+    state.settings = s;
+    const rc = $('#result-rewrite');
+    if (rc) rc.checked = on;
+  }
+}
+
+async function onClearCookie() {
+  await callApi('set_cookies_file', '');
+  const el = $('#cookies-file');
+  if (el) { el.value = ''; el.placeholder = '未设置'; }
+  updateCookieStatus('', false);
+}
+
+async function onCopyDiag() {
+  try {
+    await navigator.clipboard.writeText(diagText());
+    flash($('#copy-diag-btn'), '✓ 已复制');
+  } catch {
+    alert('复制失败，请手动选中诊断信息复制。');
   }
 }
 
@@ -798,6 +1369,7 @@ async function onPickCookie() {
   if (typeof picked === 'string' && picked) {
     const el = $('#cookies-file');
     if (el) el.value = picked;
+    updateCookieStatus(picked, true);
   } else {
     alert('没能选择到文件。如果没弹出选择框，请检查它是否被浏览器窗口挡住了。');
   }
@@ -808,9 +1380,190 @@ async function onPickDir() {
   if (typeof picked === 'string' && picked) {
     const el = $('#output-dir');
     if (el) el.value = picked;
+    // 诊断信息里的「保存路径」要跟着变，否则反馈里带的是旧目录
+    if (!state.defaults) state.defaults = {};
+    state.defaults.download = { ...(state.defaults.download || {}), output_dir: picked };
+    renderDiagnostics();
   } else {
     alert('没能选择到文件夹。如果没弹出选择框，请检查它是否被浏览器窗口挡住了。');
   }
+}
+
+/* ==================== MD5 页 ==================== */
+/* 三段式：入口（虚线选择框）→ 详情（预览 + 信息 + 修改）→ 结果（新旧对比 + 保存）。
+ * 与安卓端一致的三条规矩：原件不动、成品另存、改完前后 MD5 必须真的不同。 */
+const md5State = { stage: 'entry', picked: null, result: null, busy: false };
+
+function md5Bytes(n) {
+  const v = Number(n) || 0;
+  if (v <= 0) return '—';
+  if (v >= 1024 * 1024) return `${(v / 1024 / 1024).toFixed(2)} MB`;
+  if (v >= 1024) return `${(v / 1024).toFixed(2)} KB`;
+  return `${v} B`;
+}
+
+function md5Mmss(sec) {
+  const s = Number(sec) || 0;
+  if (!s) return '—';
+  const p = n => String(n).padStart(2, '0');
+  return `${p(Math.floor(s / 60))}:${p(s % 60)}`;
+}
+
+function md5Resolution(info) {
+  return (info.width > 0 && info.height > 0) ? `${info.width} x ${info.height}` : '—';
+}
+
+function md5Preview(info) {
+  const src = localUrl(info.path);
+  if (info.kind === 'image') {
+    return `<img src="${esc(src)}" alt="预览">`;
+  }
+  return `<video src="${esc(src)}" controls preload="metadata"></video>`;
+}
+
+function md5Row(label, value, cls = '') {
+  return `<div class="md5-row">
+    <span class="md5-label">${esc(label)}</span>
+    <span class="md5-value ${cls}">${value}</span>
+  </div>`;
+}
+
+function setMd5Stage(stage) {
+  md5State.stage = stage;
+  $('#md5-entry').classList.toggle('is-hidden', stage !== 'entry');
+  $('#md5-detail').classList.toggle('is-hidden', stage !== 'detail');
+  $('#md5-result').classList.toggle('is-hidden', stage !== 'result');
+}
+
+function md5Notice(id, msg) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = msg || '';
+  el.classList.toggle('is-hidden', !msg);
+}
+
+function md5RenderDetail(info) {
+  $('#md5-preview-1').innerHTML = md5Preview(info);
+  const rows = [
+    info.kind === 'video' ? md5Row('时长', md5Mmss(info.duration)) : '',
+    md5Row('大小', md5Bytes(info.size), 'is-size'),
+    md5Row('分辨率', md5Resolution(info)),
+    md5Row('MD5', info.md5 || '—'),
+  ].join('');
+  $('#md5-info-1').innerHTML = rows;
+  md5Notice('#md5-detail-notice', '');
+}
+
+function md5RenderResult(r) {
+  $('#md5-preview-2').innerHTML = md5Preview(r);
+  const oldSize = r.before_size > 0 ? md5Bytes(r.before_size) : '';
+  const rows = [
+    r.kind === 'video' ? md5Row('时长', md5Mmss(r.duration)) : '',
+    md5Row('大小',
+      (oldSize ? `<span class="struck">${esc(oldSize)}</span>` : '') +
+      `<span class="is-size">${esc(md5Bytes(r.size))}</span>`),
+    md5Row('分辨率', md5Resolution(r)),
+    md5Row('MD5',
+      `<span class="struck">${esc(r.before || '')}</span>${esc(r.after || '—')}`),
+  ].join('');
+  $('#md5-info-2').innerHTML = rows;
+  md5Notice('#md5-result-notice', '');
+}
+
+async function md5Pick(kind) {
+  if (md5State.busy) return;
+  md5Notice('#md5-notice', '');
+  const info = await callApi('pick_md5_media', kind);
+  if (!info || info.ok === false) {
+    // 用户点了「取消」不是错误，不弹红字
+    const err = (info && info.error) || '';
+    if (err && err.indexOf('没有选择文件') < 0) md5Notice('#md5-notice', err);
+    return;
+  }
+  md5State.picked = info;
+  md5RenderDetail(info);
+  setMd5Stage('detail');
+}
+
+async function md5OpenPath(path) {
+  if (!path || md5State.busy) return;
+  const info = await callApi('media_info', path);
+  if (!info || info.ok === false) {
+    md5Notice('#md5-notice', (info && info.error) || '读不到这个文件');
+    return;
+  }
+  md5State.picked = info;
+  md5RenderDetail(info);
+  setMd5Stage('detail');
+}
+
+async function md5Run() {
+  if (!md5State.picked || md5State.busy) return;
+  const btn = $('#md5-run');
+  md5State.busy = true;
+  btn.disabled = true;
+  btn.textContent = '正在改写…';
+  md5Notice('#md5-detail-notice', '');
+  try {
+    const r = await callApi('md5_edit', md5State.picked.path);
+    if (!r || r.ok === false) {
+      md5Notice('#md5-detail-notice', (r && r.error) || '改写失败');
+      return;
+    }
+    if (!r.changed) {
+      md5Notice('#md5-detail-notice',
+        '改写跑完了，但 MD5 没有变化 —— 这类文件可能不支持改写，换一个文件试试。');
+    }
+    md5State.result = r;
+    md5RenderResult(r);
+    setMd5Stage('result');
+  } finally {
+    md5State.busy = false;
+    btn.disabled = false;
+    btn.textContent = '修改 MD5';
+  }
+}
+
+async function md5Save() {
+  if (!md5State.result || md5State.busy) return;
+  const btn = $('#md5-save');
+  md5State.busy = true;
+  btn.disabled = true;
+  btn.textContent = '保存中…';
+  try {
+    const r = await callApi('md5_save_as', md5State.result.path);
+    if (!r || r.ok === false) {
+      md5Notice('#md5-result-notice', (r && r.error) || '保存失败');
+    } else {
+      md5Notice('#md5-result-notice', `已保存到：${r.path}`);
+    }
+  } finally {
+    md5State.busy = false;
+    btn.disabled = false;
+    btn.textContent = '保存文件';
+  }
+}
+
+async function loadMd5Downloads() {
+  const box = $('#md5-downloads');
+  if (!box) return;
+  const list = await callApi('list_downloads');
+  if (!Array.isArray(list) || !list.length) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = `
+    <h3 class="md5-section">已下载的视频</h3>
+    <p class="field-hint">点一条也能改它的 MD5。改的是副本，原文件不会被改动。</p>
+    ${list.map(item => `
+      <div class="md5-dl" data-path="${esc(item.path)}">
+        <div class="md5-dl-head">
+          <span class="pf-icon ${platformMeta(item.platform).cls}">${brandIcon(item.platform)}</span>
+          <span class="md5-dl-title">${esc(item.title || item.filename)}</span>
+        </div>
+        <p class="md5-dl-sub">${esc(item.filename)} · ${esc(md5Bytes(item.size))}</p>
+        ${item.file_md5 ? `<p class="md5-dl-sub">MD5：${esc(item.file_md5)}</p>` : ''}
+      </div>`).join('')}`;
 }
 
 /* ==================== 媒体加载失败兜底 ====================
@@ -846,12 +1599,24 @@ function on(id, event, handler) {
 }
 
 async function boot() {
+  initTheme();
   document.querySelectorAll('.nav-item').forEach(btn => {
     btn.addEventListener('click', () => switchView(btn.dataset.view));
   });
 
+  on('theme-row', 'click', e => {
+    const chip = e.target.closest('.chip');
+    if (chip) setThemeMode(chip.dataset.themeMode);
+  });
+  on('clear-cookie-btn', 'click', onClearCookie);
+  on('copy-diag-btn', 'click', onCopyDiag);
+
   on('paste-btn', 'click', onPaste);
   on('parse-btn', 'click', onParse);
+  on('clear-parse-btn', 'click', onClearParse);
+  on('url-input', 'keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); onParse(); }
+  });
   on('history-list', 'click', onHistoryClick);
   on('platform-tabs', 'click', onPlatformTabClick);
   on('clear-platform-btn', 'click', onClearPlatform);
@@ -859,6 +1624,21 @@ async function boot() {
   on('pick-dir-btn', 'click', onPickDir);
   on('pick-cookie-btn', 'click', onPickCookie);
   on('parse-result', 'click', onResultClick);
+  on('parse-result', 'change', onResultChange);
+  on('rewrite-md5', 'change', onToggleRewrite);
+  // ---- MD5 页 ----
+  on('md5-pick-video', 'click', () => md5Pick('video'));
+  on('md5-pick-image', 'click', () => md5Pick('image'));
+  on('md5-pick-any', 'click', () => md5Pick('all'));
+  on('md5-downloads', 'click', e => {
+    const card = e.target.closest('.md5-dl');
+    if (card) md5OpenPath(card.dataset.path);
+  });
+  on('md5-back-1', 'click', () => setMd5Stage('entry'));
+  on('md5-back-2', 'click', () => setMd5Stage('entry'));
+  on('md5-reselect', 'click', () => setMd5Stage('entry'));
+  on('md5-run', 'click', md5Run);
+  on('md5-save', 'click', md5Save);
   on('confirm-cancel', 'click', closeConfirm);
   on('confirm-ok', 'click', runConfirm);
   on('dl-open', 'click', () => callApi('open_folder', dlPath));

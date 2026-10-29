@@ -31,6 +31,9 @@ android/app/src/main/jniLibs/**/libffprobe.so
 Thumbs.db
 desktop.ini
 
+# 工具生成的分享包（打包产物，本机临时文件）
+.trae-html-share-packages/
+
 # 授权联调服务器的本地数据（里面是测试密钥，不进仓库）
 server/.dev-data.json
 

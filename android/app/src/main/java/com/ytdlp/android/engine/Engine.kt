@@ -244,6 +244,20 @@ object Engine {
     fun editMd5To(context: Context, src: String, dst: String): Md5Result = Md5Result.fromJson(
         JSONObject(module(context).callAttr("edit_md5_to", src, dst).toString())
     )
+
+    /**
+     * 从视频的 [atSec] 秒处抽一帧存成 JPEG（实况图封面用）。
+     *
+     * 合成时传「时长中点」而不是 0：手机实况的封面本来就取在视频中段，
+     * 取首帧会让静图与视频第一帧完全重合，长按播放就成了「播一段视频」，
+     * 没有实况图那种「从静图动起来」的过渡。
+     */
+    fun extractCover(context: Context, video: String, dst: String, atSec: Double): Md5Result =
+        Md5Result.fromJson(
+            JSONObject(
+                module(context).callAttr("extract_cover", video, dst, atSec).toString()
+            )
+        )
 }
 
 /**

@@ -4,6 +4,19 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>视频解析下载</title>
+<script>
+/* 主题要尽早套上，否则会先闪一帧浅色（脚本放 body 末尾就晚了） */
+(function () {
+  try {
+    var mode = localStorage.getItem('yd_theme') || 'system';
+    var dark = mode === 'dark' ||
+      (mode === 'system' && window.matchMedia &&
+       window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    document.documentElement.dataset.themeMode = mode;
+  } catch (e) { /* 隐私模式下 localStorage 不可用，忽略 */ }
+})();
+</script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -14,6 +27,7 @@
     <nav class="nav-list">
       <button class="nav-item is-active" data-view="parse" type="button">解析</button>
       <button class="nav-item" data-view="history" type="button">解析历史</button>
+      <button class="nav-item" data-view="md5" type="button">MD5</button>
       <button class="nav-item" data-view="settings" type="button">设置</button>
     </nav>
   </aside>
@@ -28,6 +42,7 @@
       <p class="field-hint">支持直接粘贴整段分享文案，会自动提取其中的链接。</p>
       <div class="input-actions">
         <button id="parse-btn" class="btn btn-primary" type="button">解 析</button>
+        <button id="clear-parse-btn" class="btn btn-ghost is-hidden" type="button">清空结果</button>
       </div>
       <div id="parse-result" class="card result is-hidden"></div>
     </section>
@@ -46,11 +61,84 @@
       <div id="history-list" class="history"></div>
     </section>
 
+    <!-- ========== MD5 视图 ========== -->
+    <section class="view" data-view="md5">
+      <div class="view-head">
+        <h2 class="view-title">MD5 修改</h2>
+      </div>
+
+      <!-- 入口：虚线选择框 + 已下载文件（次要分区） -->
+      <div id="md5-entry">
+        <div class="card">
+          <p class="md5-desc">
+            MD5 是整份文件的指纹。改写用的是 ffmpeg 无损重封装（不重编码，画质不变），
+            只会在元数据里写一个随机串；图片则写进 PNG 的 tEXt / JPEG 的 COM 段。
+            原件全程不动，成品另存一份。
+          </p>
+          <div class="pick-box">
+            <p class="pick-title">从电脑里选择要修改 MD5 的视频或图片</p>
+            <div class="pick-actions">
+              <button id="md5-pick-video" class="btn btn-primary" type="button">选择视频</button>
+              <button id="md5-pick-image" class="btn btn-ghost" type="button">选择图片</button>
+              <button id="md5-pick-any" class="btn btn-ghost" type="button">其他文件</button>
+            </div>
+          </div>
+          <div id="md5-notice" class="md5-notice is-hidden"></div>
+        </div>
+        <div id="md5-downloads"></div>
+      </div>
+
+      <!-- 详情页 -->
+      <div id="md5-detail" class="is-hidden">
+        <div class="md5-bar">
+          <button id="md5-back-1" class="btn btn-ghost btn-sm" type="button">← 返回</button>
+          <span class="md5-title">MD5 修改</span>
+        </div>
+        <div class="card">
+          <div id="md5-preview-1" class="md5-preview"></div>
+          <div id="md5-info-1" class="md5-table"></div>
+        </div>
+        <div id="md5-detail-notice" class="md5-notice is-hidden"></div>
+        <button id="md5-run" class="btn btn-primary md5-main" type="button">修改 MD5</button>
+        <p class="field-hint">改出来的是一份新文件，你选的原始文件不会被改动。</p>
+      </div>
+
+      <!-- 结果页 -->
+      <div id="md5-result" class="is-hidden">
+        <div class="md5-bar">
+          <button id="md5-back-2" class="btn btn-ghost btn-sm" type="button">← 返回</button>
+          <span class="md5-title">MD5 修改</span>
+        </div>
+        <div class="card">
+          <div id="md5-preview-2" class="md5-preview"></div>
+          <div id="md5-info-2" class="md5-table"></div>
+        </div>
+        <div id="md5-result-notice" class="md5-notice is-hidden"></div>
+        <div class="md5-actions">
+          <button id="md5-reselect" class="btn btn-ghost" type="button">重选</button>
+          <button id="md5-save" class="btn btn-primary" type="button">保存文件</button>
+        </div>
+        <p class="field-hint">保存会另存一份新文件到下载目录，原文件保持不动。</p>
+      </div>
+    </section>
+
     <!-- ========== 设置视图 ========== -->
     <section class="view" data-view="settings">
       <div class="view-head">
         <h2 class="view-title">设置</h2>
       </div>
+
+      <div class="card">
+        <div class="field">
+          <span class="field-label">外观</span>
+          <div class="chip-row" id="theme-row">
+            <button class="chip" data-theme-mode="light" type="button">浅色</button>
+            <button class="chip" data-theme-mode="dark" type="button">深色</button>
+            <button class="chip" data-theme-mode="system" type="button">跟随系统</button>
+          </div>
+        </div>
+      </div>
+
       <div class="card">
         <div class="field">
           <label class="field-label" for="output-dir">下载保存路径</label>
@@ -61,28 +149,83 @@
           <p class="field-hint">始终以最高画质下载，视频将保存到该目录。</p>
         </div>
       </div>
+
       <div class="card">
         <div class="field">
           <label class="field-label" for="cookies-file">Cookie 文件（cookies.txt）</label>
           <div class="field-row">
             <input id="cookies-file" class="input" type="text" readonly placeholder="未设置">
             <button id="pick-cookie-btn" class="btn btn-ghost" type="button">选择文件</button>
+            <button id="clear-cookie-btn" class="btn btn-ghost is-hidden" type="button">清除</button>
           </div>
+          <p class="field-hint" id="cookie-status"></p>
           <p class="field-hint">
-            <strong>当前需要 Cookie 的平台</strong>：X(Twitter)、Instagram。
-            小红书不需要 —— 安卓端走应用内置浏览器，首次登录一次即可。
-            其余不需要：YouTube、B站、TikTok 都不用（实测给 YouTube 带 Cookie 反而会降画质）；
-            抖音已改用浏览器模式解析，同样不再需要。
-            Cookie 会过期，失效后重新导出覆盖即可。请用 Cookie-Editor 导出
+            <strong>需要 Cookie 的平台</strong>：Instagram、TikTok。
+            其余不需要 —— YouTube、B站、抖音、快手、公众号都不用；X 在官方接口失效时会自动走备用链路；
+            小红书走浏览器模式（首次在「登录小红书.bat」里登录一次即可），不必导出 Cookie。
+            给 YouTube 带 Cookie 反而会降画质，别导。请用 Cookie-Editor 导出
             <strong>Netscape 格式</strong>的 cookies.txt。
           </p>
         </div>
       </div>
+
       <div class="card">
         <div class="field">
-          <span class="field-label">反馈</span>
-          <p class="field-hint">遇到问题或有功能建议，欢迎邮件反馈。</p>
-          <a id="feedback-mail" class="btn btn-ghost" href="mailto:">发送邮件</a>
+          <span class="field-label">下载时自动改 MD5</span>
+          <label class="switch-row">
+            <input type="checkbox" id="rewrite-md5">
+            <span>开启后，下载完用 ffmpeg 无损重封装，换一个 MD5</span>
+          </label>
+          <p class="field-hint" id="ffmpeg-status"></p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="field">
+          <span class="field-label">意见反馈</span>
+          <p class="field-hint">
+            点下面的按钮会用邮件客户端打开一封已经写好正文的邮件：
+            里面带上版本、系统与诊断信息，能省不少来回确认。
+            描述问题时把平台和链接写清楚，复现会快很多。
+          </p>
+          <a id="feedback-mail" class="btn btn-ghost" href="mailto:">发送反馈邮件</a>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="field">
+          <span class="field-label">诊断信息</span>
+          <p class="field-hint" id="diag-build"></p>
+          <p class="field-hint" id="diag-system"></p>
+          <p class="field-hint" id="diag-ffmpeg"></p>
+          <button id="copy-diag-btn" class="btn btn-ghost" type="button">复制诊断信息</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="field">
+          <span class="field-label">关于</span>
+          <p class="field-hint">
+            支持范围：YouTube / B站 / 抖音 / 快手 / TikTok / X / Instagram / 小红书 / 微博 /
+            微信公众号 / 微信视频号（仅预览）。抖音、快手、小红书、微博的图文、图集、实况图都已支持；
+            实况图会存成「图片 + 同名视频」两个文件。
+          </p>
+          <p class="field-hint">
+            其他平台的解析与下载由内置 yt-dlp 完成；音视频合流与 MD5 改写用 ffmpeg。
+            抖音走公开接口（浏览器仅兜底），快手走移动版分享页，公众号是公开网页；
+            小红书走浏览器模式（首次登录一次），微博正文页走移动版页面；X 优先用第三方服务。
+          </p>
+          <p class="field-hint">
+            <strong>清晰度、编码与体积</strong>：同样标着 1080p，体积可能差出一倍 ——
+            差的是编码与码率，不是分辨率。H.264 兼容性最好、体积偏大；H.265 同画质体积小得多，
+            但部分老设备解不了；AV1 体积更小、能放的设备更少。拿不准就选 H.264 那一档。
+          </p>
+          <p class="field-hint">
+            <strong>MD5</strong>：整份文件的指纹。改的是容器里的元数据，不动画面 ——
+            视频往 mp4 的 comment 里写随机串，图片写进 PNG 的 tEXt 或 JPEG 的 COM 段，
+            音视频一个字节都没有重编码，画质零损失。改完前后体积只差几十字节是对的，
+            操作在「MD5」页签，全程另存副本。
+          </p>
         </div>
       </div>
     </section>

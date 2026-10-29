@@ -156,8 +156,9 @@ def resolve_via_api(share_url: str, timeout: int = 20) -> dict:
         )
 
     video = target.get("video") or {}
+    images = target.get("images") or []
     play_url, download_url = _pick_tiers(video)
-    if not play_url:
+    if not play_url and not images:
         raise DouyinFallbackError("接口返回里没有可用的视频地址")
 
     author = target.get("author") or {}
@@ -173,11 +174,163 @@ def resolve_via_api(share_url: str, timeout: int = 20) -> dict:
         "thumbnail": cover or "",
         "play_url": play_url,
         "download_url": download_url,
+        # 原始数据：档位、图文/图集/实况图的媒体列表都只在原始对象里，
+        # 交给 engine 统一按 douyin_collect_tiers / _douyin_image_url 处理，
+        # 避免这里再写一份挑档逻辑。
+        "video": video,
+        "images": images,
     }
 
 
 _lock = threading.Lock()
 _page = None
+
+
+# ==================== 主文档解析（图文 / 图集 / 实况图）====================
+# 抖音的「笔记」类作品（图文/图集/实况图）不会被免签名的 feed 接口服务，
+# 但桌面版页面的主文档里，服务端把这条作品的数据直出在 React 流式负载里。
+# 与安卓端 DouyinParser.parseMainDocument 同一条思路：以 `"images":` 为锚点，
+# 往前找标题/作者，往后抠出整段数组。
+
+
+def _id_from_url(url: str) -> str:
+    m = re.search(r"/(?:video|note)/(\d{10,25})", url or "")
+    return m.group(1) if m else ""
+
+
+def _unescape_js(raw: str) -> str:
+    """把页面里 JS 字符串的一层转义还原（`\\"` → `"`，`\\\\` → `\\`）。"""
+    return raw.replace('\\"', '"').replace("\\\\", "\\")
+
+
+def _extract_array(text: str, key: str) -> str | None:
+    """从 key 之后抠出配对的 JSON 数组原文（正确处理字符串里的括号）。"""
+    i = text.find(key)
+    if i < 0:
+        return None
+    j = text.find("[", i)
+    if j < 0:
+        return None
+    depth, in_str, esc = 0, False, False
+    for k in range(j, len(text)):
+        ch = text[k]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    return text[j:k + 1]
+    return None
+
+
+def _last_json_str(text: str, key: str) -> str:
+    """取锚点之前**最近一次**有效出现的 `key: "..."`。
+
+    页面里同名字段会出现多次，其中不少是 React 流式负载的占位符
+    `"$undefined"`（实测：直接取最后一次会拿到它当标题）。所以从近到远扫，
+    跳过占位符与空串，返回第一个真正有内容的值。
+    """
+    matches = list(re.finditer(rf'"{key}"\s*:\s*"((?:\\.|[^"\\])*)"', text))
+    for m in reversed(matches):
+        raw = m.group(1)
+        try:
+            value = json.loads(f'"{raw}"')
+        except Exception:  # noqa: BLE001
+            value = raw
+        if value and value != "$undefined":
+            return value
+    return ""
+
+
+def _pick_doc_image(item: dict) -> str:
+    urls = item.get("urlList") or item.get("url_list") or []
+    fallback = ""
+    for u in urls:
+        if not u:
+            continue
+        if not fallback:
+            fallback = u
+        low = str(u).lower()
+        if ".jpeg" in low or ".jpg" in low:
+            return u
+    return fallback
+
+
+def parse_main_document(html_text: str, source_url: str, expected_id: str = "") -> dict | None:
+    """从页面主文档里解析图文/图集/实况图；返回 None 表示不是这类页面。"""
+    text = _unescape_js(html_text or "")
+    raw = _extract_array(text, '"images":')
+    if not raw:
+        return None
+    try:
+        images = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(images, list) or not images:
+        return None
+
+    anchor = text.find('"images":')
+    scope = text[max(0, anchor - 20000):anchor]
+    desc = _last_json_str(scope, "desc")
+    nickname = _last_json_str(scope, "nickname")
+    unique_id = _last_json_str(scope, "unique_id")
+
+    media: list[dict] = []
+    for item in images:
+        if not isinstance(item, dict):
+            continue
+        url = _pick_doc_image(item)
+        if not url:
+            continue
+        live = ""
+        video = item.get("video") or {}
+        play = video.get("playAddr") or video.get("play_addr") or []
+        if isinstance(play, list) and play:
+            first = play[0] or {}
+            live = first.get("src") or ""
+        media.append({
+            "url_list": [url],
+            "width": int(item.get("width") or 0),
+            "height": int(item.get("height") or 0),
+            "video": {"play_addr": {"url_list": [live]}} if live else None,
+            "kind": "image",
+        })
+    if not media:
+        return None
+
+    return {
+        "id": expected_id or source_url,
+        "title": desc,
+        "uploader": nickname,
+        "uploader_id": unique_id,
+        "duration": None,
+        "thumbnail": media[0]["url_list"][0],
+        "play_url": "",
+        "download_url": "",
+        "video": {},
+        "images": media,
+    }
+
+
+def _pause_page_media(page) -> None:
+    """把页面上正在播的视频停掉（否则窗口关掉后声音还在后台响）。"""
+    try:
+        page.run_js(
+            "document.querySelectorAll('video,audio').forEach(function(e){"
+            "try{e.pause();e.muted=true;e.currentTime=0}catch(_){}})"
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _find_browser() -> str:
@@ -304,20 +457,32 @@ def _diag(page) -> str:
         return "（浏览器已不可用，可能已被关闭）"
 
 
-def resolve(share_url: str, timeout: int = 45) -> dict:
+def resolve(share_url: str, timeout: int = 15) -> dict:
     """用浏览器打开分享链接，返回统一的记录字段。
 
-    返回的键与 engine._to_record 对齐，便于直接复用入库与界面渲染逻辑。
-    失败时抛 DouyinFallbackError（由调用方翻译给用户）。
+    两条路都走：
+      ① 主文档 —— 图文/图集/实况图是服务端直出的，打开页面就有；
+      ② 详情接口 —— 视频页主文档只是 JS 壳，数据要等页面自己请求回来。
+    与安卓端 DouyinActivity 的处理顺序一致。
     """
     with _lock:  # 同一个浏览器实例不能并发操作
         page = _get_page()
         page.listen.start(DETAIL_API)
         page.get(share_url)
+
+        expected = _id_from_url(page.url) or _id_from_url(share_url)
+        try:
+            payload = parse_main_document(page.html, share_url, expected)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[douyin] 主文档解析失败：{exc}")
+            payload = None
+        if payload:
+            _pause_page_media(page)
+            return payload
+
         try:
             res = page.listen.wait(timeout=timeout, raise_err=False)
         except TypeError:
-            # 兼容不同版本的 wait 签名
             res = page.listen.wait(timeout=timeout)
         except Exception as exc:  # noqa: BLE001
             raise DouyinFallbackError(f"等待接口响应时出错：{exc}") from exc
@@ -338,8 +503,9 @@ def resolve(share_url: str, timeout: int = 45) -> dict:
             )
 
         video = detail.get("video") or {}
+        images = detail.get("images") or []
         play_url, download_url = _pick_tiers(video)
-        if not play_url:
+        if not play_url and not images:
             raise DouyinFallbackError("没有取到可播放的视频地址")
 
         author = detail.get("author") or {}
@@ -365,6 +531,8 @@ def resolve(share_url: str, timeout: int = 45) -> dict:
             "thumbnail": cover,
             "play_url": play_url,
             "download_url": download_url,
+            "video": video,
+            "images": images,
         }
 
 

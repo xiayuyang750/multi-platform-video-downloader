@@ -37,9 +37,13 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import java.util.concurrent.atomic.AtomicInteger
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.abs
 
 /** 转 JPEG 时要带过去的 EXIF 字段：拍摄参数、机型、方向，以及宽高。 */
 private val EXIF_COPY_TAGS = listOf(
@@ -179,6 +183,41 @@ data class Md5Ui(
     val notice: String? = null,
 )
 
+/**
+ * 「实况」页的状态：一张图 + 一段视频 + 输出格式开关。
+ *
+ * 页面只做三件事（选图 / 选视频 / 保存），所以状态很浅；真正的工作在
+ * [LivePhotoSynth] 里，全部是纯文件操作，不依赖网络也不依赖引擎。
+ */
+data class LiveUi(
+    val imagePath: String = "",
+    val imageLabel: String = "",
+    val videoPath: String = "",
+    val videoLabel: String = "",
+    /**
+     * 每次重选自增。缩略图必须靠它判断「素材换过了」——
+     * 缓存副本按槽位固定命名（永远是 `video.mp4`），路径不变时 Compose 会认
+     * 两次参数完全相同而**跳过重组**，抽帧的 key 也就不会重新计算，旧缩略图会一直留着。
+     */
+    val imageRev: Int = 0,
+    val videoRev: Int = 0,
+    /**
+     * 输出文件名前缀，用户可改。留空时用「原图名_实况」——
+     * 比纯时间戳可读：用户导出后一眼知道它来自哪张图。
+     */
+    val namePrefix: String = "",
+    /**
+     * false（默认）= 同名配对 + 写 `live_photo` 字段，vivo / 红米这条已实测；
+     * true = 单文件（JPEG 内嵌 MP4 + XMP），小米 / OPPO / 华为 / 原生走这条。
+     */
+    val singleFile: Boolean = false,
+    val working: Boolean = false,
+    val error: String = "",
+    val notice: String? = null,
+    /** 上一次成功的产物路径。非空时界面显示「查看」按钮。 */
+    val savedPath: String = "",
+)
+
 /** 检查更新的状态。失败原因由 UpdateChecker 侧翻译成中文，界面直接用。 */
 sealed interface UpdateUi {
     data object Idle : UpdateUi
@@ -203,6 +242,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _md5 = MutableStateFlow(Md5Ui())
     val md5: StateFlow<Md5Ui> = _md5.asStateFlow()
+
+    private val _live = MutableStateFlow(LiveUi())
+    val live: StateFlow<LiveUi> = _live.asStateFlow()
 
     private val _download = MutableStateFlow(
         Download("idle", false, null, "", "", 0, 0, 0.0, null)
@@ -584,11 +626,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 if (targets.isEmpty()) return@runCatching
+                // 顺序不能换：先给配对图片追加 vivo 私有段（id 在这里定下），
+                // 再扫描入库（_size 才对得上），最后拿同一批 id 写媒体库字段。
+                val pairs = if (f.isDirectory) prepareLivePhotos(f) else emptyList()
                 // 扫完（每个文件回调一次）再登记实况图：登记要改 MediaStore 里的记录，
                 // 而记录是扫描之后才存在的，所以必须等它扫完。
                 val left = AtomicInteger(targets.size)
                 MediaScannerConnection.scanFile(ctx, targets.toTypedArray(), null) { _, _ ->
-                    if (left.decrementAndGet() == 0 && f.isDirectory) markLivePhotos(f)
+                    if (left.decrementAndGet() == 0) applyLivePhotos(pairs)
                 }
             }
         }
@@ -642,12 +687,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
 
     /**
-     * 把目录里「同名的图片 + 视频」登记成系统相册的**动态照片（实况图）**。
+     * 扫描前把目录里「同名的图片 + 视频」准备好：每一对生成独立 id，并把 id 写进
+     * 图片尾部的 vivo 私有段；返回配对表，等扫描入库后再拿同一批 id 写媒体库字段。
      *
-     * 为什么光有同名文件还不够：实测（vivo）发现，相册读的是 MediaStore 里一个
-     * 厂商私有字段 `live_photo`，而且**图片记录和视频记录两边都要有值**才算数 ——
-     * 只写一边，相册照样显示成普通图片。抖音下载的实况图就是这么做的
-     * （它的图片和视频两条记录里都带着这个字段）。
+     * 为什么光有同名文件还不够：实测（vivo）发现相册读的是 MediaStore 里一个厂商
+     * 私有字段 `live_photo`，而且**图片记录和视频记录两边都要有值**才算数 ——
+     * 只写一边，相册照样显示成普通图片。
+     *
+     * 2026-10-25 实测补充：vivo 的实况是**双写**的，除了媒体库字段，JPEG 尾部还有
+     * 一段厂商私有数据（见 [LivePhotoSynth.appendVivoTail]）。只写字段时相册能播，
+     * 但详情页没有「动态照片 / 关闭动态照片」菜单，微信/抖音/小红书也认不出来。
+     * 所以这里先把文件尾写好，再去扫描。
      *
      * 图片扩展名**不能只认 `.jpg`**：实况图的图片扩展名是从抖音地址里推出来的，
      * 抖音给的是 `.jpg` 还是 `.jpeg` 并不固定（实测同一个账号下两种都有）。
@@ -658,9 +708,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * 这个字段名是厂商私有的，换品牌未必叫这个，所以整段是「能写就写」：
      * 写不上就安静跳过 —— 文件本身该在还在，不影响任何别的功能。
      */
-    private fun markLivePhotos(dir: File) {
+    private fun prepareLivePhotos(dir: File): List<Triple<File, File, String>> {
+        val pairs = mutableListOf<Triple<File, File, String>>()
         runCatching {
-            val stamp = "${System.currentTimeMillis()}000000000000000"
             val imageExts = setOf("jpg", "jpeg", "webp", "png")
             dir.listFiles()
                 ?.filter { it.isFile && it.extension.lowercase() in imageExts }
@@ -668,14 +718,38 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     // 配对靠「同名」：图片与那段动效视频同名，只有扩展名不同
                     val mp4 = File(dir, image.nameWithoutExtension + ".mp4")
                     if (!mp4.exists()) return@forEach
-                    val imageId = mediaId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, image)
-                        ?: return@forEach
-                    val mp4Id = mediaId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, mp4)
-                        ?: return@forEach
-                    putLivePhoto(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, imageId, stamp)
-                    putLivePhoto(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, mp4Id, stamp)
+                    val id = nextLivePhotoId()
+                    // 先写文件尾的私有段，再交给扫描：媒体库的 _size 是扫描时读的
+                    LivePhotoSynth.appendVivoTail(image, id)
+                    pairs += Triple(image, mp4, id)
                 }
         }
+        return pairs
+    }
+
+    /** 扫描完成后再写媒体库字段：id 必须与图片尾部那段私有数据里的完全一致。 */
+    private fun applyLivePhotos(pairs: List<Triple<File, File, String>>) {
+        pairs.forEach { (image, mp4, id) -> stampLivePhotoPair(image, mp4, id) }
+    }
+
+    /**
+     * 每一对必须有**各不相同**的 id。
+     *
+     * vivo 相册是按「图片与视频同名」配对的，整个目录共用一个值它也能正常播；
+     * 但微信等第三方是按这个字段去找配对视频的 —— 同目录十几张共用一个值，
+     * 它们就全部指向第一条视频（真机现象：发出去的实况图都播第一张的动效）。
+     */
+    private var livePhotoSeed = System.currentTimeMillis()
+
+    private fun nextLivePhotoId(): String = "${livePhotoSeed++}000000000000000"
+
+    private fun stampLivePhotoPair(image: File, mp4: File, stamp: String) {
+        val imageId = mediaId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, image)
+            ?: return
+        val mp4Id = mediaId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, mp4)
+            ?: return
+        putLivePhoto(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, imageId, stamp)
+        putLivePhoto(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, mp4Id, stamp)
     }
 
     /** 按文件路径查出它在 MediaStore 里的 _id。查不到（还没扫进来）返回 null。 */
@@ -969,6 +1043,245 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** 一次性提示显示完就清掉，避免转屏后又弹一次。 */
     fun consumeMd5Notice() {
         _md5.value = _md5.value.copy(notice = null)
+    }
+
+    // ==================== 实况图合成 ====================
+    // 与 MD5 流程完全独立：自己用 cacheDir/live 存副本，不调用 Md5Media 的那些
+    // 「开始新任务就清空缓存」的入口（否则先选图再选视频会把图清掉）。
+
+    fun pickLiveImage(uri: Uri) = pickLive(uri, video = false)
+
+    fun pickLiveVideo(uri: Uri) = pickLive(uri, video = true)
+
+    private fun pickLive(uri: Uri, video: Boolean) {
+        if (_live.value.working) return
+        viewModelScope.launch {
+            _live.value = _live.value.copy(working = true, error = "", notice = null)
+            val r = withContext(Dispatchers.IO) {
+                runCatching { LivePhotoSynth.pick(ctx, uri, if (video) "video" else "image") }
+            }
+            _live.value = r.fold(
+                onSuccess = { p ->
+                    if (video) {
+                        _live.value.copy(
+                            working = false,
+                            videoPath = p.file.absolutePath,
+                            videoLabel = p.label,
+                            videoRev = _live.value.videoRev + 1,
+                        )
+                    } else {
+                        _live.value.copy(
+                            working = false,
+                            imagePath = p.file.absolutePath,
+                            imageLabel = p.label,
+                            imageRev = _live.value.imageRev + 1,
+                        )
+                    }
+                },
+                onFailure = {
+                    _live.value.copy(working = false, error = it.message ?: "读不到这个文件")
+                },
+            )
+        }
+    }
+
+    /** 切换输出格式。不清已选的素材，用户改主意时不用重新选一遍。 */
+    fun setLiveSingleFile(enabled: Boolean) {
+        _live.value = _live.value.copy(singleFile = enabled, error = "")
+    }
+
+    /** 改输出文件名前缀。空串表示回到默认（原图名_实况）。 */
+    fun setLiveNamePrefix(text: String) {
+        // 文件名里不能出现路径分隔符，顺手挡掉；长度也要收一收，
+        // 否则加上时间戳后会超过部分文件系统的单段上限
+        val safe = text.replace('/', '_').replace('\\', '_').take(40)
+        _live.value = _live.value.copy(namePrefix = safe)
+    }
+
+    /**
+     * 清空已选的图片。
+     *
+     * 必须有这个入口：用户选错图后如果只能「重选」，就得再翻一遍相册；
+     * 而「不选图片」本身是合法状态（会自动抽首帧），所以得能退回这个状态。
+     */
+    fun clearLiveImage() {
+        _live.value = _live.value.copy(imagePath = "", imageLabel = "", error = "")
+    }
+
+    fun consumeLiveNotice() {
+        _live.value = _live.value.copy(notice = null)
+    }
+
+    /**
+     * 打开上一次的产物。
+     *
+     * 不自己做播放器：实况图的「预览」本来就是相册的交互（静图封面 + 长按播放），
+     * 自己重写一套既费事又不一致。交给系统：先按路径查出媒体库的 content:// 地址
+     * （扫描过就有了），再用 ACTION_VIEW 拉起，相册认得出这是动态照片。
+     */
+    fun openLiveResult() {
+        val path = _live.value.savedPath
+        if (path.isBlank()) return
+        val f = File(path)
+        if (!f.exists()) {
+            _live.value = _live.value.copy(error = "产物不在了，可能已被移动或删除")
+            return
+        }
+        val isImage = f.extension.lowercase() in setOf("jpg", "jpeg", "png", "webp")
+        val collection = if (isImage) {
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        } else {
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        }
+        val id = mediaId(collection, f) ?: run {
+            _live.value = _live.value.copy(error = "相册还没收录这个文件，稍等一下再点")
+            return
+        }
+        val uri = android.content.ContentUris.withAppendedId(collection, id)
+        runCatching {
+            ctx.startActivity(
+                android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, if (isImage) "image/*" else "video/*")
+                    addFlags(
+                        android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                            android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                }
+            )
+        }.onFailure {
+            _live.value = _live.value.copy(error = "没有能打开这个文件的应用")
+        }
+    }
+
+    /**
+     * 图片与视频是不是同一画幅。
+     *
+     * 比的是**宽高比**，不是像素尺寸：手机拍的 2160×3840 与下载/导出的 720×1280
+     * 都是 9:16，属于同一画幅，配一起完全正常，只是清晰度不同。
+     *
+     * 容差 1%：覆盖 1080×1920 与 1078×1918 这类编码取整产生的微小偏差。
+     * 同时接受「互为倒数」：图片带 EXIF 旋转、视频带 rotation 标记时，宽高会被互换。
+     * 拿不到宽高（0）时放行 —— 不能因为探测失败就挡住用户。
+     */
+    private fun sameAspect(w1: Int, h1: Int, w2: Int, h2: Int): Boolean {
+        if (w1 <= 0 || h1 <= 0 || w2 <= 0 || h2 <= 0) return true
+        val a = w1.toDouble() / h1
+        val b = w2.toDouble() / h2
+        return abs(a - b) / b <= 0.01 || abs(a * b - 1.0) <= 0.01
+    }
+
+    /**
+     * 合成并保存。
+     *
+     * 产物落到与下载相同的目录（`settings.outputDir`），用户在一个地方就能找齐。
+     * 原件（缓存副本）不动；目录里重名时自动换名字，绝不覆盖已有文件。
+     */
+    fun saveLive() {
+        val s = _live.value
+        val vid = File(s.videoPath)
+        // 视频是**必需**的：实况图的动效就是这段视频，没有它就没有「动」。
+        // 图片可选 —— 不选时从视频抽首帧当封面（尺寸天然一致）。
+        if (!vid.exists()) {
+            _live.value = s.copy(error = "先选择一段视频")
+            return
+        }
+        if (s.working) return
+
+        viewModelScope.launch {
+            _live.value = s.copy(working = true, error = "", notice = null)
+            val r = withContext(Dispatchers.IO) {
+                runCatching {
+                    val dir = File(Engine.settings(ctx).outputDir).apply { mkdirs() }
+
+                    // 封面：用户选了图就用它，但**必须与视频同画幅**。
+                    // 注意是画幅比例，不是像素尺寸：手机拍的 2160×3840 和导出/下载的
+                    // 720×1280 都是 9:16，配在一起完全正常，只是清晰度不同。
+                    // 比例不同才会出问题 —— 相册切到视频那一刻画面会跳变、变形。
+                    val cover: File = if (s.imagePath.isNotBlank()) {
+                        val img = File(s.imagePath)
+                        if (!img.exists()) throw IllegalStateException("选中的图片不在了")
+                        val imgInfo = Md5Media.probe(img, Md5Media.IMAGE)
+                        val vidInfo = Md5Media.probe(vid, Md5Media.VIDEO)
+                        if (imgInfo.width > 0 && vidInfo.width > 0 &&
+                            !sameAspect(imgInfo.width, imgInfo.height, vidInfo.width, vidInfo.height)
+                        ) {
+                            throw IllegalStateException(
+                                "图片是 ${imgInfo.width}×${imgInfo.height}（宽高比 " +
+                                    "%.2f），视频是 ${vidInfo.width}×${vidInfo.height}（宽高比 %.2f），"
+                                        .format(
+                                            imgInfo.width.toDouble() / imgInfo.height,
+                                            vidInfo.width.toDouble() / vidInfo.height,
+                                        ) +
+                                    "两者画幅比例不同。实况图的封面必须和视频同画幅，否则相册播放时画面会跳变 —— " +
+                                    "分辨率不同没关系，比例一致就行。" +
+                                    "请换一张同比例的图，或者清空图片让系统自动抽首帧。"
+                            )
+                        }
+                        img
+                    } else {
+                        // 自动抽帧：取**时长中点**，不是首帧。
+                        // 首帧与视频第 0 帧像素级相同，相册播放时完全无缝衔接，
+                        // 观感就是「播了一段视频」；手机拍的实况图封面本来就落在视频
+                        // 中段，长按时会先看到静图、再跳回开头播放，才有「动起来」的过渡。
+                        val coverPath = File(LivePhotoSynth.workDir(ctx), "cover.jpg")
+                        val durSec = Md5Media.probe(vid, Md5Media.VIDEO).durationMs / 1000.0
+                        val res = Engine.extractCover(
+                            ctx, vid.absolutePath, coverPath.absolutePath, durSec / 2,
+                        )
+                        if (!res.ok) throw IllegalStateException(
+                            "从视频抽取封面失败：${res.error.ifBlank { "未知原因" }}"
+                        )
+                        coverPath
+                    }
+
+                    val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                    // 默认名取自「用户实际选的那个素材」的**原始显示名**：
+                    // 选了图就用图名，只选视频就用视频名。
+                    // 不能用磁盘上的 name —— 缓存副本按槽位固定命名（video.mp4 / cover.jpg），
+                    // 生成出来就全叫「video_实况_…」「cover_实况_…」，用户看不出是哪条素材。
+                    val base = s.namePrefix.trim().ifBlank {
+                        val src = if (s.imagePath.isNotBlank()) s.imageLabel else s.videoLabel
+                        src.substringBeforeLast('.', src) + "_实况"
+                    }
+                    val stem = "${base}_$stamp"
+                    if (s.singleFile) {
+                        val out = LivePhotoSynth.uniqueOut(dir, stem)
+                        LivePhotoSynth.embed(cover, vid, out)
+                        MediaScannerConnection.scanFile(
+                            ctx, arrayOf(out.absolutePath), null, null,
+                        )
+                        out
+                    } else {
+                        val files = LivePhotoSynth.pair(cover, vid, dir, stem)
+                        // 三步顺序不能换：写文件尾私有段（id 在这里定）→ 扫描入库 →
+                        // 写媒体库字段。只登记本次这一对，不扫全目录。
+                        val id = nextLivePhotoId()
+                        LivePhotoSynth.appendVivoTail(files[0], id)
+                        val left = AtomicInteger(files.size)
+                        MediaScannerConnection.scanFile(
+                            ctx, files.map { it.absolutePath }.toTypedArray(), null,
+                        ) { _, _ ->
+                            if (left.decrementAndGet() == 0) {
+                                stampLivePhotoPair(files[0], files[1], id)
+                            }
+                        }
+                        files.first()
+                    }
+                }
+            }
+            _live.value = r.fold(
+                onSuccess = {
+                    _live.value.copy(
+                        working = false,
+                        notice = "已保存到 ${it.absolutePath}",
+                        savedPath = it.absolutePath,
+                    )
+                },
+                onFailure = {
+                    _live.value.copy(working = false, error = it.message ?: "合成失败")
+                },
+            )
+        }
     }
 
     /**

@@ -13,6 +13,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import mimetypes
+import os
 import secrets
 import shutil
 import sys
@@ -52,6 +53,9 @@ API = {
     "get_history": ENGINE.get_history,
     "get_download_state": ENGINE.get_download_state,
     "parse_url": ENGINE.parse_url,
+    "start_parse": ENGINE.start_parse,
+    "get_parse_state": ENGINE.get_parse_state,
+    "cancel_parse": ENGINE.cancel_parse,
     "start_download": ENGINE.start_download,
     "delete_history": ENGINE.delete_history,
     "clear_history": ENGINE.clear_history,
@@ -61,6 +65,16 @@ API = {
     "set_output_dir": ENGINE.set_output_dir,
     "pick_cookie_file": ENGINE.pick_cookie_file,
     "set_cookies_file": ENGINE.set_cookies_file,
+    "get_settings": ENGINE.get_settings,
+    "set_rewrite_md5": ENGINE.set_rewrite_md5,
+    # ---- MD5 ----
+    "list_downloads": ENGINE.list_downloads,
+    "get_file_md5": ENGINE.get_file_md5,
+    "edit_file_md5_to": ENGINE.edit_file_md5_to,
+    "pick_md5_media": ENGINE.pick_md5_media,
+    "media_info": ENGINE.media_info,
+    "md5_edit": ENGINE.md5_edit,
+    "md5_save_as": ENGINE.md5_save_as,
     "get_feedback_mail": lambda: FEEDBACK_MAIL,
     "get_build": ENGINE.get_build,
 }
@@ -180,6 +194,62 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass  # 用户拖动进度条/关页面时会断开，正常现象
 
+    def _serve_file(self, file_path: str) -> None:
+        """把本地产物喂给浏览器，支持 Range（拖动进度条要用）。
+
+        与 /media 的区别：那条是「替你去网上取流」，这条是「本机文件」。
+        准入在 ENGINE.is_playable_path 里做，这里只管发字节。
+        """
+        try:
+            total = os.path.getsize(file_path)
+        except OSError:
+            self.send_error(404)
+            return
+
+        start, end = 0, total - 1
+        status = 200
+        rng = self.headers.get("Range")
+        if rng and rng.startswith("bytes="):
+            spec = rng[len("bytes="):].split(",")[0]
+            try:
+                a, _, b = spec.partition("-")
+                if a.strip():
+                    start = int(a)
+                if b.strip():
+                    end = min(int(b), total - 1)
+            except ValueError:
+                start, end = 0, total - 1
+            if start >= total or start > end:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{total}")
+                self.end_headers()
+                return
+            status = 206
+
+        length = end - start + 1
+        ctype = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{total}")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+        try:
+            with open(file_path, "rb") as fh:
+                fh.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = fh.read(min(256 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # 用户拖动进度条 / 关页面时会断开，正常现象
+
     # ---------- 路由 ----------
 
     def do_GET(self) -> None:  # noqa: N802
@@ -207,6 +277,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(400)
                 return
             self._proxy_media(media_url, query.get("ref", [""])[0])
+            return
+
+        if path == "/file":
+            query = parse_qs(parsed.query)
+            if not self._token_ok(query):
+                self.send_error(403)
+                return
+            file_path = query.get("p", [""])[0]
+            if not file_path or not ENGINE.is_playable_path(file_path):
+                self.send_error(403, "path not allowed")
+                return
+            self._serve_file(file_path)
             return
 
         if path.startswith("/api/"):

@@ -42,6 +42,14 @@ class XFallbackError(RuntimeError):
     """备用链路失败。消息本身已写成「给用户看的话」，调用方直接展示即可。"""
 
 
+class XNoMediaError(XFallbackError):
+    """这条推文**本身**就没有媒体（纯文字 / 投票 / 文章）。
+
+    与上面那类的区别很关键：这类失败说明「换条链路、补 Cookie 也没用」，
+    所以调用方不该再往下去试 yt-dlp、更不该提示用户去查 Cookie。
+    """
+
+
 def _tweet_id(url: str) -> str:
     """从推文链接里取出数字编号。"""
     m = re.search(r"(?:x\.com|twitter\.com)/[^/]*/status(?:es)?/(\d+)", url or "")
@@ -85,8 +93,22 @@ def _fetch(api_url: str, timeout: int) -> dict:
         raise XFallbackError("解析服务返回的内容无法识别，可能已改版。") from exc
 
 
+def _wh_from_url(url: str) -> tuple[int, int]:
+    """从推特视频地址里抠宽高：形如 `.../vid/avc1/1308x2326/xxx.mp4`。"""
+    m = re.search(r"/(\d{2,5})x(\d{2,5})/", url or "")
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
 def _extract(data: dict) -> dict:
-    """把 fxtwitter 的返回整理成与 engine._to_record 一致的字段。"""
+    """把 fxtwitter 的返回整理成统一记录。
+
+    一条推文里的媒体可能有几种：单个视频、多个视频、若干张图、图文混排。
+    接口全都给了（media.videos / media.photos，图片还是 ?name=orig 原图），
+    所以全部收进 media 列表、每项带 kind，下游按列表走。
+
+    早先只读 media.videos 的第一条，于是「图片/图集」被判成「没有视频」，
+    「多视频」「图文混排」都只拿到其中一个。
+    """
     code = data.get("code")
     if code is not None and code != 200:
         raise XFallbackError(
@@ -97,32 +119,69 @@ def _extract(data: dict) -> dict:
     if not status:
         raise XFallbackError("解析服务没有返回推文内容。")
 
-    videos = ((status.get("media") or {}).get("videos")) or []
-    if not videos:
-        # 注意：这通常是真的没视频，而不是网络问题，要区分开告诉用户
-        raise XFallbackError("这条推文里没有视频（可能只有文字或图片）。")
+    media_obj = status.get("media") or {}
+    raw_videos = media_obj.get("videos") or []
+    raw_photos = media_obj.get("photos") or []
 
-    video = videos[0]
-    play_url = video.get("url") or ""
-    if not play_url:
-        raise XFallbackError("解析服务没有给出可下载的视频地址，可能已改版。")
+    media: list[dict] = []
+    for p in raw_photos:
+        url = (p.get("url") or "").strip()
+        if url:
+            media.append({
+                "kind": "image",
+                "url": url,
+                "width": int(p.get("width") or 0),
+                "height": int(p.get("height") or 0),
+            })
+    for v in raw_videos:
+        url = (v.get("url") or "").strip()
+        if not url:
+            continue
+        w, h = int(v.get("width") or 0), int(v.get("height") or 0)
+        if not (w and h):
+            w, h = _wh_from_url(url)
+        media.append({"kind": "video", "url": url, "width": w, "height": h})
+
+    if not media:
+        raise XNoMediaError(
+            "这条推文里没有可下载的内容 —— 纯文字、投票、文章类推文本身不含媒体文件。"
+        )
 
     author = status.get("author") or {}
-    duration = video.get("duration")
-    tid = str(status.get("id") or video.get("id") or "")
-
-    return {
+    tid = str(status.get("id") or "")
+    text = (status.get("text") or "").strip()
+    base = {
         "id": tid,
-        # 推文正文作为标题；没正文时用编号兜底，避免出现空标题
-        "title": (status.get("text") or "").strip() or f"推文 {tid}",
+        "title": text or f"推文 {tid}",
         "uploader": author.get("name") or "",
-        # @handle（例如 JjGoDJu4aL2efLM），界面上作为「作者唯一标识」显示
         "uploader_id": author.get("screen_name") or "",
-        "duration": int(duration) if duration else None,
-        "thumbnail": video.get("thumbnail_url") or "",
-        "play_url": play_url,
-        # 拿到的就是最高画质直链，播放和下载共用同一个地址
-        "download_url": play_url,
+    }
+
+    # 只有一条视频、且没有图片时，仍按「普通视频」走（播放器直接播，最省事）
+    if len(media) == 1 and media[0]["kind"] == "video":
+        v = raw_videos[0]
+        duration = v.get("duration")
+        return {
+            **base,
+            "duration": int(duration) if duration else None,
+            "thumbnail": v.get("thumbnail_url") or "",
+            "play_url": media[0]["url"],
+            "download_url": media[0]["url"],
+            "content_type": "video",
+        }
+
+    # 其余情况（纯图片 / 图集 / 多视频 / 图文混排）统一按「媒体列表」处理
+    cover = (raw_videos[0].get("thumbnail_url") if raw_videos else "") or ""
+    if not cover and raw_photos:
+        cover = raw_photos[0].get("url") or ""
+    return {
+        **base,
+        "duration": None,
+        "thumbnail": cover,
+        "play_url": "",
+        "download_url": "",
+        "content_type": "images",
+        "media": media,
     }
 
 
@@ -136,6 +195,9 @@ def resolve(tweet_url: str, timeout: int = 20) -> dict:
     for name, template in SERVICES:
         try:
             return _extract(_fetch(template.format(id=tid), timeout))
+        except XNoMediaError:
+            # 「本来就没有媒体」是结论、不是服务故障：调用方需要原样看到这个类型
+            raise
         except XFallbackError as exc:
             last_error = f"{name}：{exc}"
         except Exception as exc:  # noqa: BLE001
