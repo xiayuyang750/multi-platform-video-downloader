@@ -41,10 +41,10 @@ android {
         applicationId = "com.ytdlp.android"
         minSdk = 26
         targetSdk = 36
-        // 1.0.6：新平台接入（小红书先行 —— 识别规则、Cookie 规则、错误提示、
-        // 品牌图标两端同步）。这一版仍在开发中，README 更新日志与发布页收尾时统一补。
-        versionCode = 6
-        versionName = "1.0.6"
+        // 1.0.7：快手平台、全平台正文提取、抖音多渠道路由与失败快判（v1.0.7 进展快照），
+        // 以及新增「实况」页（手动选图 + 视频合成实况图）与 vivo 实况双写兼容。
+        versionCode = 7
+        versionName = "1.0.7"
 
         // 授权服务地址，见文件上方 licenseBaseUrl 的说明
         buildConfigField("String", "LICENSE_BASE_URL", "\"$licenseBaseUrl\"")
