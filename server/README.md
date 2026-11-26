@@ -113,17 +113,17 @@ node server/dev-server.mjs
 启动后会打印电脑的局域网地址，例如：
 
 ```
-App 填：http://192.168.0.103:8787
+App 填：http://&lt;电脑局域网IP&gt;:8787
 管理口令：dev-admin
 ```
 
 然后打包时指定这个地址：
 
 ```powershell
-gradle ... "-PlicenseBaseUrl=http://192.168.0.103:8787"
+gradle ... "-PlicenseBaseUrl=http://&lt;电脑局域网IP&gt;:8787"
 ```
 
-手机与电脑连同一个 WiFi 即可。管理页：`http://192.168.0.103:8787/admin`。
+手机与电脑连同一个 WiFi 即可。管理页：`http://&lt;电脑局域网IP&gt;:8787/admin`。
 
 ---
 
