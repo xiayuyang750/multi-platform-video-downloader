@@ -36,4 +36,19 @@ object DeviceId {
         val digest = MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02x".format(it.toInt() and 0xFF) }.take(32)
     }
+
+    /**
+     * 授权后台展示用的可读设备信息。
+     *
+     * 只上报 Build 里的公开字段，不包含 ANDROID_ID、IMEI 这类可关联标识 ——
+     * 设备绑定仍然只认上面的哈希，这些字段纯粹是给人看的备注。
+     */
+    fun info(): Map<String, String> = mapOf(
+        "manufacturer" to Build.MANUFACTURER.orEmpty(),
+        "brand" to Build.BRAND.orEmpty(),
+        "model" to Build.MODEL.orEmpty(),
+        "device" to Build.DEVICE.orEmpty(),
+        "android" to Build.VERSION.RELEASE.orEmpty(),
+        "sdk" to Build.VERSION.SDK_INT.toString(),
+    )
 }

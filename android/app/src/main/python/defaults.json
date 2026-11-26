@@ -4,7 +4,7 @@
   "_platform_note": "安卓端拿不到、也不需要的 Windows 专有项：output_dir（设备相关，由 Kotlin 在启动时注入）、ffmpeg_dir / js_runtimes（安卓上必须是应用原生库目录的绝对路径，同样运行时注入）、--windows-filenames / -P / --print（命令行专用，改为 yt-dlp 的 Python 参数）。",
 
   "download": {
-    "filename_template": "%(title)s [%(id)s].%(ext)s",
+    "filename_template": "%(title).120B - %(uploader,channel,creator|未知作者)s.%(ext)s",
     "single_video_no_playlist": true
   },
 

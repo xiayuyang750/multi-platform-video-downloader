@@ -281,5 +281,91 @@ class TestXhsMapping(unittest.TestCase):
         self.assertEqual("6acc7d9b00000000180154ec", web_fallback._xhs_note_id(
             "https://www.xiaohongshu.com/discovery/item/6acc7d9b00000000180154ec?xsec_token=x"))
 
+class TestWechatPictureLive(unittest.TestCase):
+    """公众号「图片消息」里的实况图：静态图 + live_photo 动效要一起解析出来。
+
+    样本结构照抄真机页面（2026-11，item_show_type=8）：format_id '0' 是原片，
+    10002 是压缩档；排序必须按 height/width/file_size，不能按 format_id 数值。
+    """
+
+    PAGE = (
+        "window.picture_page_info_list = [{"
+        "cdn_url: 'https://mmbiz.qpic.cn/a/0?wx_fmt=jpeg',"
+        "width: '2560', height: '3413',"
+        "live_photo: {vid: 'live_x', format_info: ["
+        "{format_id: '0', url: 'https://bcvideo.qpic.cn/a.f0.mp4?a=1\\x26amp;b=2',"
+        " file_size: '4326260', duration: '2866', width: '1920', height: '1440'},"
+        "{format_id: '10002', url: 'https://bcvideo.qpic.cn/a.f10002.mp4',"
+        " file_size: '359395', duration: '2000', width: '1080', height: '1440'}"
+        "], type: '1'},"
+        "original_info: {show_original: true,"
+        " cdn_url: 'https://mmbiz.qpic.cn/a/0?wx_fmt=jpeg', file_size: '1'}"
+        "}];"
+    )
+
+    def test_live_photo_url_is_picked(self) -> None:
+        rec, quality = eng._wx_picture_record(
+            "https://mp.weixin.qq.com/s/5kBdHMclpQ_obZbkl4bHFw", self.PAGE)
+        media = json.loads(rec["media_json"])
+        self.assertEqual("live", rec["content_type"])
+        self.assertEqual("实况图 · 共 1 张", quality)
+        # 取原片（f0，1440 高），并把 \x26amp; 还原成 &
+        self.assertEqual("https://bcvideo.qpic.cn/a.f0.mp4?a=1&b=2", media[0]["live"])
+
+    def test_plain_picture_stays_images(self) -> None:
+        page = ("window.picture_page_info_list = [{"
+                "cdn_url: 'https://mmbiz.qpic.cn/b/0?wx_fmt=jpeg',"
+                "width: '100', height: '200'}];")
+        rec, quality = eng._wx_picture_record("https://mp.weixin.qq.com/s/x", page)
+        self.assertEqual("images", rec["content_type"])
+        self.assertEqual("图文 · 共 1 张", quality)
+        self.assertEqual("", json.loads(rec["media_json"])[0]["live"])
+
+
+class TestXhsVideoPick(unittest.TestCase):
+    def test_returns_dimensions_of_picked_stream(self) -> None:
+        video_json = json.dumps({"media": {"stream": {
+            "EF4": [{"masterUrl": "https://v/nosound.mp4", "width": 720,
+                     "height": 1280, "size": 9, "audioChannels": 0}],
+            "EF5": [{"masterUrl": "https://v/sound.mp4", "width": 1080,
+                     "height": 1920, "size": 5, "audioChannels": 2}],
+        }}})
+        play, download, has_audio, w, h = eng._xhs_pick_video(video_json)
+        self.assertEqual("https://v/sound.mp4", play)
+        self.assertEqual(play, download)
+        self.assertTrue(has_audio)
+        self.assertEqual((1080, 1920), (w, h))
+
+    def test_empty_stream(self) -> None:
+        self.assertEqual(("", "", False, 0, 0), eng._xhs_pick_video("{}"))
+
+
+class TestXQuality(unittest.TestCase):
+    """X 的规格行必须是「这条媒体自己的分辨率」，不能是固定文案。"""
+
+    def test_single_video_uses_own_resolution(self) -> None:
+        self.assertEqual("1080×1920", eng._x_quality(
+            "video", [], {"width": 1080, "height": 1920}))
+
+    def test_multi_video_lists_each_resolution(self) -> None:
+        media = [
+            {"kind": "video", "width": 1920, "height": 1080},
+            {"kind": "video", "width": 1280, "height": 720},
+            {"kind": "image", "width": 100, "height": 200},
+        ]
+        q = eng._x_quality("images", media, {})
+        self.assertIn("1920×1080", q)
+        self.assertIn("1280×720", q)
+        self.assertIn("共 3 项", q)
+
+    def test_images_only_reports_count(self) -> None:
+        self.assertEqual("图集 · 共 2 项", eng._x_quality(
+            "images", [{"kind": "image"}, {"kind": "image"}], {}))
+
+    def test_missing_dimensions_do_not_fabricate(self) -> None:
+        self.assertEqual("原始画质（第三方服务解析）",
+                         eng._x_quality("video", [], {}))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

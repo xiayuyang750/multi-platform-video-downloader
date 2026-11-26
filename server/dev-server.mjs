@@ -42,10 +42,15 @@ const env = {
       store.delete(k);
       persist();
     },
-    async list({ prefix = '' } = {}) {
+    async list({ prefix = '', limit, cursor } = {}) {
+      // 与 Cloudflare KV 对齐：按 key 排序、支持 limit/cursor 分页
+      const all = [...store.keys()].filter((k) => k.startsWith(prefix)).sort();
+      const start = cursor ? Number(cursor) : 0;
+      const end = start + (limit || all.length);
       return {
-        keys: [...store.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name })),
-        list_complete: true,
+        keys: all.slice(start, end).map((name) => ({ name })),
+        list_complete: end >= all.length,
+        cursor: String(end),
       };
     },
   },

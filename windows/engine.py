@@ -632,11 +632,15 @@ def _xhs_is_muxed(entry: dict) -> bool:
     return codec not in ("", "none")
 
 
-def _xhs_pick_video(video_json: str) -> tuple[str, str, bool]:
-    """返回 (播放地址, 下载地址, 是否带声音)。"""
+def _xhs_pick_video(video_json: str) -> tuple[str, str, bool, int, int]:
+    """返回 (播放地址, 下载地址, 是否带声音, 宽, 高)。
+
+    宽高取自被选中的那条候选（stream 里每项都带 width/height），界面用它显示
+    具体画质；取不到就是 0。
+    """
     entries = _xhs_stream_entries(video_json)
     if not entries:
-        return "", "", False
+        return "", "", False, 0, 0
 
     def by_height(rows: list) -> dict:
         return sorted(rows, key=lambda i: (int(i.get("height") or 0),
@@ -644,10 +648,14 @@ def _xhs_pick_video(video_json: str) -> tuple[str, str, bool]:
 
     muxed = [e for e in entries if _xhs_is_muxed(e)]
     if muxed:
-        url = by_height(muxed).get("masterUrl") or ""
-        return url, url, True
-    url = by_height(entries).get("masterUrl") or ""
-    return url, url, False
+        best = by_height(muxed)
+        url = best.get("masterUrl") or ""
+        return (url, url, True, int(best.get("width") or 0),
+                int(best.get("height") or 0))
+    best = by_height(entries)
+    url = best.get("masterUrl") or ""
+    return (url, url, False, int(best.get("width") or 0),
+            int(best.get("height") or 0))
 
 
 # 微博「视频页」：这些形态 yt-dlp 能直接解析，保持走 yt-dlp（快）。
@@ -857,8 +865,69 @@ def _wx_video_tiers(page: str) -> list[dict]:
     return tiers
 
 
+def _wx_live_video(entry: str) -> str:
+    """取一条图文图片里的「实况动效」视频地址（最高清那一档）。
+
+    实测结构（2026-11，图片消息模板，item_show_type=8）：
+
+        live_photo: {
+            vid: 'live_xxx',
+            format_info: [
+                {format_id: '0', url: 'https://bcvideo.qpic.cn/…f0.mp4', file_size, duration, width, height},
+                {format_id: '10002', …}, {format_id: '10003', …}, {format_id: '10004', …},
+            ],
+            type: '1',
+        }
+
+    `format_id` 是平台自己的编号（0 = 原片，10002/10003/10004 是逐级压缩档），
+    不能按「数字大小」猜清晰度；这里按 height / width / file_size 排序，
+    取最高的那条。没有 live_photo 的普通图片返回空串。
+    """
+    i = entry.find("live_photo:")
+    if i < 0:
+        return ""
+    k = entry.find("{", i)
+    if k < 0:
+        return ""
+    live = _wx_block(entry, k, "{", "}")
+    j = live.find("format_info:")
+    if j < 0:
+        return ""
+    a = live.find("[", j)
+    if a < 0:
+        return ""
+    arr = _wx_block(live, a, "[", "]")
+
+    best_url, best_key = "", (-1, -1, -1)
+    pos = 0
+    while pos < len(arr):
+        o = arr.find("{", pos)
+        if o < 0:
+            break
+        one = _wx_block(arr, o, "{", "}")
+        pos = o + len(one) + 2
+
+        url = _wx_first(one, r"url:\s*'([^']+)'")
+        if not url.startswith("http"):
+            continue
+
+        def _num(name):
+            v = _wx_first(one, rf"{name}:\s*'?(\d+)'?")
+            return int(v) if v.isdigit() else 0
+
+        key = (_num("height"), _num("width"), _num("file_size"))
+        if key > best_key:
+            best_key, best_url = key, url
+    return best_url
+
+
 def _wx_picture_items(page: str) -> list[dict]:
-    """贴图 / 图文模板：解析 `picture_page_info_list`，优先取「查看原图」地址。"""
+    """贴图 / 图文模板：解析 `picture_page_info_list`，优先取「查看原图」地址。
+
+    每条还会带上 `live`：实况图的那段动效视频（没有就是空串）。图片消息模板
+    把实况拆成「一张静态图 + 一段 2~3 秒的 mp4」两样存，早先只取了静态图，
+    所以实况图在界面上永远不动。
+    """
     i = page.find("picture_page_info_list")
     if i < 0:
         return []
@@ -887,6 +956,7 @@ def _wx_picture_items(page: str) -> list[dict]:
             "url": url,
             "width": int(w) if w.isdigit() else 0,
             "height": int(h) if h.isdigit() else 0,
+            "live": _wx_live_video(ent),
             "kind": "image",
         })
     return out
@@ -964,6 +1034,9 @@ def _wx_picture_record(url: str, page: str) -> tuple[dict, str]:
     media = _wx_picture_items(page)
     if not media:
         raise ValueError("这条图文里没有取到图片（可能已被删除或需要验证）。")
+    # 只要有一张带 live_photo，整条就按「实况图」展示：浏览时逐张叠播动效，
+    # 下载时给带 live 的那几张多存一份同名 mp4。
+    has_live = any((it or {}).get("live") for it in media)
 
     rec = {
         "id": _wx_article_id(url),
@@ -978,12 +1051,13 @@ def _wx_picture_record(url: str, page: str) -> tuple[dict, str]:
         "download_url": "",
         "resolved_at": int(time.time()),
         "play_kind": "none",
-        "content_type": "images",
+        "content_type": "live" if has_live else "images",
         "media_json": json.dumps(media, ensure_ascii=False),
         "description": body,
         "source_md5": "",
     }
-    return rec, f"图文 · 共 {len(media)} 张"
+    return rec, (f"实况图 · 共 {len(media)} 张" if has_live
+                 else f"图文 · 共 {len(media)} 张")
 
 
 # ==================== 图文/图集下载用的小工具 ====================
@@ -1524,6 +1598,30 @@ class ParseState:
 
 
 # ==================== 业务逻辑 ====================
+
+
+def _x_quality(ctype: str, media: list, data: dict) -> str:
+    """X 的规格行：按**这一条媒体自己的**宽高生成，不用固定文案。
+
+    - 单视频：直接写这条视频的宽高（FxTwitter 的 media.videos[i].width/height）
+    - 图文混排 / 多视频：逐条列出视频的宽高（图片没有「画质」概念，不参与）
+    - 纯图片：只报张数
+    """
+    if ctype == "live":
+        return f"实况图 · 共 {len(media)} 项"
+    if ctype == "video":
+        vw = int(data.get("width") or 0)
+        vh = int(data.get("height") or 0)
+        return f"{vw}×{vh}" if vw and vh else "原始画质（第三方服务解析）"
+    vids = [m for m in (media or []) if (m or {}).get("kind") == "video"]
+    dims = [
+        f"{int(m.get('width') or 0)}×{int(m.get('height') or 0)}"
+        for m in vids
+        if int(m.get("width") or 0) and int(m.get("height") or 0)
+    ]
+    if dims:
+        return f"图集 · 共 {len(media)} 项（视频 {'、'.join(dims)}）"
+    return f"图集 · 共 {len(media)} 项"
 
 
 class Engine:
@@ -2298,12 +2396,8 @@ class Engine:
             "media_json": json.dumps(media, ensure_ascii=False) if media else "",
         }
         self.store.upsert(rec)
-        if ctype == "images":
-            quality = f"图集 · 共 {len(media)} 项"
-        elif ctype == "live":
-            quality = f"实况图 · 共 {len(media)} 项"
-        else:
-            quality = "最高画质（第三方服务解析）"
+        # 规格行按这条媒体自己的宽高生成（多视频会逐条列出），不用固定文案。
+        quality = _x_quality(ctype, media, data)
         return {
             "ok": True,
             **self._with_local_path(rec),
@@ -2364,9 +2458,12 @@ class Engine:
 
         play_url = download_url = ""
         has_audio = True
+        # 小红书选中的那条候选带分辨率；微博的浏览器链路只给一条 stream_url，
+        # 没有宽高可报，保持 0（界面不显示尺寸，不编数字）。
+        vw = vh = 0
         if ctype == "video":
             if platform == "小红书":
-                play_url, download_url, has_audio = _xhs_pick_video(
+                play_url, download_url, has_audio, vw, vh = _xhs_pick_video(
                     data.get("video_raw") or ""
                 )
             else:
@@ -2396,8 +2493,11 @@ class Engine:
         elif ctype == "live":
             quality = f"实况图 · 共 {count} 张"
         else:
-            quality = ("原始画质（浏览器取数）" if has_audio
-                       else "原始画质（浏览器取数 · 该条只有画面，无音轨）")
+            # 规格行只写这条视频自己的分辨率；拿不到才退回「原始画质」。
+            # 无音轨要单独标出来：小红书这类内容里的纯画面流（DASH 分片）
+            # 本身就没有音轨，用户看到「无声」才不会被当成播放器坏了。
+            dims = f"{vw}×{vh}" if (vw and vh) else "原始画质（浏览器取数）"
+            quality = dims if has_audio else dims + " · 该条只有画面，无音轨"
         return {
             "ok": True,
             **self._with_local_path(rec),
@@ -2498,29 +2598,41 @@ class Engine:
                 "mtime": int(latest)}
 
     def _direct_stem(self, rec: dict | None) -> str:
-        """直链下载用的文件名主干（不含扩展名）。
+        """单文件视频的文件名主干（不含扩展名），直链与 yt-dlp 两条路共用。
 
-        走直链时拿不到元数据，%(title)s / %(id)s 只能从 URL 里猜；所以用库里
-        存的标题和 id。Windows 路径上限 260 字符，按「目录 + ID + 扩展名」倒推。
+        命名规则（用户定的）：`标题 - 作者`。原先末尾挂的是 `[作品 id]` —— 那是
+        **作品 id**、不是作者唯一标识，用户明确不要；作者名才是他想要的信息。
+        重名不靠 id 区分，由 ` (1)/(2)…` 另存一份。
+
+        Windows 路径上限 260 字符，按「目录 + 扩展名 + 余量」倒推可用长度；
+        超长时保作者、裁标题（标题取最大可用长度）。
         """
         title = ((rec or {}).get("title") or "").strip()
         if not title:
             return ""
-        vid = ((rec or {}).get("id") or "").strip()
-        suffix = f" [{vid}].mp4" if vid else ".mp4"
+        author = _sanitize_name(((rec or {}).get("uploader") or "").strip())
         out_dir = str((self.get_defaults().get("download") or {}).get("output_dir") or "")
-        reserve = len(out_dir) + len(suffix) + 8
-        # 标题里若含 %，会被 yt-dlp 当模板再解析一次，转义成字面量
-        safe = _sanitize_name(title).replace("%", "%%")
-        safe = safe[: max(24, 250 - reserve)].strip()
+        reserve = len(out_dir) + len(".mp4") + 8
+        limit = max(24, 250 - reserve)
+        sep = " - "
+        if author:
+            # 标题优先：作者最多占可用长度的三分之一，剩下的全给标题
+            author = author[: max(8, limit // 3)]
+            budget = max(8, limit - len(sep) - len(author))
+        else:
+            budget = limit
+        safe = _clip_title(title, budget)
         if not safe:
-            safe = vid or "download"
-        return f"{safe} [{vid}]" if vid else safe
+            safe = str((rec or {}).get("id") or "download")
+        return f"{safe}{sep}{author}" if author else safe
 
     def _direct_output_name_for(self, rec: dict | None) -> str:
-        """按一条记录拼「直链下载」的文件名模板（交给 yt-dlp 填扩展名）。"""
+        """按一条记录拼文件名模板（交给 yt-dlp 填扩展名）。"""
         stem = self._direct_stem(rec)
-        return (stem + ".%(ext)s") if stem else ""
+        if not stem:
+            return ""
+        # 标题 / 作者里的 % 会被 yt-dlp 当模板再解析一次，转义成字面量
+        return stem.replace("%", "%%") + ".%(ext)s"
 
     def _direct_output_name(self, direct_url: str) -> str:
         """按 URL 反查历史记录，再拼文件名（只对库里存的默认档有效）。"""
@@ -2574,13 +2686,19 @@ class Engine:
             headers["Referer"] = "https://www.douyin.com/"
         elif "mpvideo.qpic.cn" in target:
             headers["Referer"] = WECHAT_REFERER
+        elif "bcvideo.qpic.cn" in target:
+            # 公众号图文里的「实况动效」视频。比 mpvideo 更严：实测只带 Referer、
+            # 或只带浏览器 UA 都是 403，必须同时用微信 UA + 微信 Referer。
+            headers["Referer"] = WECHAT_REFERER
+            headers["User-Agent"] = WECHAT_UA
         eng = self.get_defaults().get("engine") or {}
         timeout = int(eng.get("socket_timeout") or 20)
         workers = max(1, int(eng.get("direct_threads") or 6))
 
         try:
-            # 公众号视频的鉴权是短时一次性的：多一次请求就多一次踩 403 的机会
-            if "mpvideo.qpic.cn" in target:
+            # 公众号视频的鉴权是短时一次性的：多一次请求就多一次踩 403 的机会。
+            # 实况动效（bcvideo）的 auth_key 同理，一并走单连接。
+            if "mpvideo.qpic.cn" in target or "bcvideo.qpic.cn" in target:
                 self._stream_get(target, path, headers, timeout, url)
             else:
                 total, ranged = self._probe_range(target, headers, timeout)
@@ -2699,7 +2817,8 @@ class Engine:
         """组装下载命令。抽出来是为了能被冒烟测试单独检查，不必真的下载。"""
         dl = cfg.get("download") or {}
         eng = cfg.get("engine") or {}
-        template = dl.get("filename_template") or "%(title)s [%(id)s].%(ext)s"
+        template = (dl.get("filename_template")
+                    or "%(title).120B - %(uploader,channel,creator|未知作者)s.%(ext)s")
         # 备用链路拿到的是裸直链，没有元数据，模板会退化成 URL 片段当文件名
         if any(host in url for host in DIRECT_URL_HOSTS):
             template = self._direct_output_name(url) or template
@@ -2944,7 +3063,15 @@ class Engine:
             live = (item or {}).get("live") or ""
             if live:
                 try:
-                    req = urllib.request.Request(live, headers=item_headers)
+                    live_headers = item_headers
+                    if "bcvideo.qpic.cn" in live:
+                        # 实况动效 CDN 与 mpvideo 同样校验请求头，而且更严：
+                        # 实测微信 UA + Referer 才 200（浏览器 UA / 只带 Referer 都 403）。
+                        live_headers = {
+                            "User-Agent": WECHAT_UA,
+                            "Referer": WECHAT_REFERER,
+                        }
+                    req = urllib.request.Request(live, headers=live_headers)
                     with urllib.request.urlopen(req, timeout=60) as resp:
                         with open(os.path.join(folder, f"{stem}{i:02d}{tag}.mp4"), "wb") as fh:
                             shutil.copyfileobj(resp, fh)

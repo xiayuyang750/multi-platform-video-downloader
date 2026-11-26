@@ -595,12 +595,19 @@ function handlePlayInline(btn) {
 }
 
 /* ==================== 历史列表 ==================== */
-/** 展开态的一行「标签 值」。标签定宽，值可换行 —— 长链接不会把布局撑破。 */
-function detailLine(label, value) {
+/** 展开态的一行「标签 值」。标签定宽，值可换行 —— 长链接不会把布局撑破。
+ *
+ *  copyable：在值右侧加一个复制小按钮（作者 / 账号 ID / 原始链接用）。
+ *  值本身很长（原始链接），按钮固定在行尾、值仍可换行。
+ */
+function detailLine(label, value, copyable = false) {
   if (!value) return '';
+  const copy = copyable
+    ? `<button class="icon-btn detail-copy" data-act="copy-value" data-copy="${esc(value)}" title="复制${esc(label)}" type="button">${ICONS.copy}</button>`
+    : '';
   return `<div class="detail-line">
     <span class="detail-label">${esc(label)}</span>
-    <span class="detail-value">${esc(value)}</span>
+    <span class="detail-value">${esc(value)}</span>${copy}
   </div>`;
 }
 
@@ -623,10 +630,10 @@ function renderItem(item) {
     <button class="icon-btn is-danger" data-act="delete" data-id="${esc(item.id)}" title="删除" type="button">${ICONS.del}</button>`;
 
   const fields = [
-    detailLine('作者', item.uploader),
-    detailLine('账号 ID', item.uploader_id),
+    detailLine('作者', item.uploader, true),
+    detailLine('账号 ID', item.uploader_id, true),
     detailLine('时长', item.duration ? formatDuration(item.duration) : ''),
-    detailLine('原始链接', item.source_url),
+    detailLine('原始链接', item.source_url, true),
     detailLine('本地文件', hasLocal ? '已下载' : ''),
   ].join('');
 
@@ -921,6 +928,17 @@ async function onHistoryClick(e) {
   // 图集翻页同理：按钮在展开区里，用所在卡片反查记录即可
   if (act === 'gallery-prev') { navigateGallery(hit, -1); return; }
   if (act === 'gallery-next') { navigateGallery(hit, 1); return; }
+  // 详情行尾的复制按钮：值就在按钮自己的 data-copy 上，不需要 data-id 反查
+  if (act === 'copy-value') {
+    try {
+      await navigator.clipboard.writeText(hit.dataset.copy || '');
+      // 不能复用 flash：那是把按钮内容换成 ✓ 再换回来，图标按钮（SVG）
+      // 会被换成文字后恢复不成图标。这里改成短暂加一个高亮 class。
+      hit.classList.add('is-copied');
+      setTimeout(() => hit.classList.remove('is-copied'), 900);
+    } catch { alert('复制失败，请手动复制。'); }
+    return;
+  }
 
   const id = hit.dataset.id;
   const item = state.history.find(h => h.id === id);

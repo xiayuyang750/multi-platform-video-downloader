@@ -89,18 +89,23 @@ class TestDirectNaming(unittest.TestCase):
     def _restore(self) -> None:
         eng.DB_FILE = self.old_db
 
-    def test_stem_has_title_and_id(self) -> None:
-        stem = self.e._direct_stem({"title": "一段标题", "id": "7692"})
-        self.assertEqual("一段标题 [7692]", stem)
+    def test_stem_has_title_and_author(self) -> None:
+        # 文件名 = 标题 - 作者；末尾不再挂作品 id（那是作品 id，不是作者标识）
+        stem = self.e._direct_stem({"title": "一段标题", "uploader": "某作者", "id": "7692"})
+        self.assertEqual("一段标题 - 某作者", stem)
 
-    def test_long_title_is_clipped(self) -> None:
-        vid = "9" * 19
-        stem = self.e._direct_stem({"title": "标题" * 200, "id": vid})
+    def test_stem_without_author_is_title_only(self) -> None:
+        stem = self.e._direct_stem({"title": "一段标题", "id": "7692"})
+        self.assertEqual("一段标题", stem)
+
+    def test_long_title_is_clipped_but_author_kept(self) -> None:
+        # 超长时保作者、裁标题（标题取最大可用长度）
+        stem = self.e._direct_stem({"title": "标题" * 200, "uploader": "作者名", "id": "9" * 19})
         self.assertLessEqual(len(stem), 250)
-        self.assertTrue(stem.endswith(f" [{vid}]"))
+        self.assertTrue(stem.endswith(" - 作者名"))
 
     def test_direct_path_avoids_overwrite(self) -> None:
-        rec = {"title": "同名", "id": "1"}
+        rec = {"title": "同名", "uploader": "作者", "id": "1"}
         first = self.e._direct_output_path("https://h/a.mp4", rec)
         self.assertTrue(first.endswith(".mp4"))
         Path(first).write_bytes(b"x")

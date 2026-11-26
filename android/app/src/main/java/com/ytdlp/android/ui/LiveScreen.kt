@@ -138,11 +138,7 @@ fun LiveScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 singleLine = true,
                 placeholder = {
                     val src = if (state.imageLabel.isBlank()) state.videoLabel else state.imageLabel
-                    Text(
-                        if (src.isBlank()) "留空则用「素材名_实况」"
-                        else "${src.substringBeforeLast('.')}_实况",
-                        fontSize = Font.body,
-                    )
+                    Text(LivePhotoSynth.defaultOutputBase(src), fontSize = Font.body)
                 },
                 shape = RoundedCornerShape(Dim.radiusSm),
                 colors = OutlinedTextFieldDefaults.colors(
@@ -155,7 +151,10 @@ fun LiveScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                     cursorColor = tone.accent,
                 ),
             )
-            Hint("最终文件名 = 上面的名字 + 保存时间，例如 xxx_20261024_101530.jpg")
+            Hint(
+                "留空时自动用「素材名_实况」（相册只给编号、拿不到素材名时用「实况」）；" +
+                    "保存时再拼上时间，例如 xxx_实况_20261024_101530.jpg。"
+            )
         }
 
         Card {

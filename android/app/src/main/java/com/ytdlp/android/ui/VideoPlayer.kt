@@ -685,12 +685,15 @@ private const val MPVIDEO_UA =
  * `mpvideo.qpic.cn`（公众号文章里的视频）同时校验 Referer 和 UA：
  * 实测带 Referer 但用 ExoPlayer 默认 UA 仍然 403，界面表现就是预览黑屏、
  * 时长 0:00；换成微信 UA 后正常。
+ *
+ * `bcvideo.qpic.cn` 是公众号图文里「实况图」的动效视频，校验更严：只带
+ * Referer 或只带浏览器 UA 都是 403，微信 UA + Referer 才 200（实测）。
  */
 private fun dataSourceFactory(url: String): DefaultHttpDataSource.Factory? = when {
     url.contains("douyinvod.com") ->
         DefaultHttpDataSource.Factory()
             .setDefaultRequestProperties(mapOf("Referer" to "https://www.douyin.com/"))
-    url.contains("mpvideo.qpic.cn") ->
+    url.contains("mpvideo.qpic.cn") || url.contains("bcvideo.qpic.cn") ->
         DefaultHttpDataSource.Factory()
             .setUserAgent(MPVIDEO_UA)
             .setDefaultRequestProperties(mapOf("Referer" to "https://mp.weixin.qq.com/"))

@@ -2,6 +2,7 @@ package com.ytdlp.android.ui
 
 import android.content.Context
 import android.net.Uri
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import java.io.File
 import java.io.FileInputStream
@@ -385,15 +386,45 @@ object LivePhotoSynth {
         return "$stem ($i)"
     }
 
-    /** 从 uri 取显示名，去掉可能带进来的路径分隔符。 */
+    /**
+     * 默认的输出名前缀（不含保存时间）。
+     *
+     * 素材名可用时是「素材名_实况」；相册选择器只给了一串编号（拿不到可读名字）
+     * 时退回「实况」—— 编号当文件名对用户毫无意义，看着就像原名被吃掉了。
+     */
+    fun defaultOutputBase(label: String): String {
+        val stem = label.substringBeforeLast('.', label).trim()
+        return if (hasReadableName(stem)) "${stem}_实况" else "实况"
+    }
+
     private fun displayName(ctx: Context, uri: Uri): String {
-        val queried = runCatching {
-            ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
-                val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
-            }
-        }.getOrNull().orEmpty()
-        return queried.replace('/', '_').replace('\\', '_').ifBlank { "live_pick" }
+        val direct = queryDisplayName(ctx, uri)
+        if (hasReadableName(direct)) return direct
+        // Photo Picker 的 DISPLAY_NAME 在部分机型上是内部编号（vivo 实测
+        // `1000679998.mp4`），真实文件名在 MediaStore 记录里。按 URI 末尾的 id
+        // 回查 Files 表 —— `_id` 全局唯一，拿到的就是同一条记录。
+        val real = runCatching { nameById(ctx, uri) }.getOrNull().orEmpty()
+        if (hasReadableName(real)) return real
+        return direct.ifBlank { "live_pick" }
+    }
+
+    /** 部分厂商选择器返回的就是 MediaStore 记录的 `_id`，按它回查一次。 */
+    private fun nameById(ctx: Context, uri: Uri): String {
+        val id = uri.lastPathSegment?.toLongOrNull() ?: return ""
+        return queryDisplayName(ctx, MediaStore.Files.getContentUri("external", id))
+    }
+
+    private fun queryDisplayName(ctx: Context, uri: Uri): String = runCatching {
+        ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
+            val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+        }
+    }.getOrNull().orEmpty().replace('/', '_').replace('\\', '_')
+
+    /** 名字至少得有点可读内容：空白、纯数字（相册内部编号）都算拿不到。 */
+    private fun hasReadableName(name: String): Boolean {
+        val stem = name.substringBeforeLast('.', name).trim()
+        return stem.isNotBlank() && !stem.all { it.isDigit() }
     }
 
     private fun fallbackExt(ctx: Context, uri: Uri): String {

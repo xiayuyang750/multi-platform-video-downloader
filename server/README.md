@@ -73,7 +73,7 @@ Worker 的地址形如：
 https://watermark-license.你的子域.workers.dev
 ```
 
-打开 `https://.../admin`，输入 `ADMIN_TOKEN`，就能生成密钥、看绑定情况、停用、解绑。
+打开 `https://.../admin`，输入 `ADMIN_TOKEN`，就能生成密钥、搜索/筛选、看绑定情况、停用、解绑、导出 CSV。
 
 ### 7. 让 App 指到这个地址
 
@@ -131,16 +131,20 @@ gradle ... "-PlicenseBaseUrl=http://192.168.0.103:8787"
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/activate` | `{ key, device }` → 绑定并返回 token |
-| POST | `/api/verify` | `{ key, device, token }` → 校验，必要时续期 |
+| POST | `/api/activate` | `{ key, device, info? }` → 绑定并返回 token |
+| POST | `/api/verify` | `{ key, device, token, info? }` → 校验，必要时续期并补全设备信息 |
 | GET | `/api/health` | 服务是否活着 |
-| POST | `/admin/api/keys` | 生成密钥，`{ count, note }` |
-| GET | `/admin/api/keys` | 列出全部密钥与绑定状态 |
+| POST | `/admin/api/keys` | 生成密钥，`{ count, note }`，`count` 最多 20（管理页会自动分批） |
+| GET | `/admin/api/keys?limit=50&cursor=…` | 分页列出密钥与绑定状态，管理页会自动翻页取全 |
+| GET | `/admin/api/logs` | 最近 200 条生成 / 停用 / 解绑 / 备注记录 |
+| POST | `/admin/api/note` | 修改备注，`{ key, note }` |
 | POST | `/admin/api/revoke` | `{ key, banned }` 停用 / 恢复 |
 | POST | `/admin/api/unbind` | `{ key }` 解绑设备 |
 | GET | `/admin` | 管理页面 |
 
 管理接口统一用 `Authorization: Bearer <ADMIN_TOKEN>`。
+
+管理面另有几条防护：管理接口不开放 CORS、口令采用定长比较、同一 IP 连续 8 次口令错误会锁定 5 分钟、管理页带 CSP 与 `no-store`，生成 / 停用 / 解绑都会写入审计日志。
 
 ---
 

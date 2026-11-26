@@ -10,11 +10,15 @@ function makeEnv() {
       async get(k) { return store.has(k) ? store.get(k) : null; },
       async put(k, v) { store.set(k, v); },
       async delete(k) { store.delete(k); },
-      async list({ prefix = '', cursor } = {}) {
-        const keys = [...store.keys()]
-          .filter((k) => k.startsWith(prefix))
-          .map((name) => ({ name }));
-        return { keys, list_complete: true, cursor: undefined };
+      async list({ prefix = '', limit, cursor } = {}) {
+        const all = [...store.keys()].filter((k) => k.startsWith(prefix)).sort();
+        const start = cursor ? Number(cursor) : 0;
+        const end = start + (limit || all.length);
+        return {
+          keys: all.slice(start, end).map((name) => ({ name })),
+          list_complete: end >= all.length,
+          cursor: String(end),
+        };
       },
     },
     LICENSE_SECRET: 'test-secret',
@@ -205,6 +209,157 @@ test('管理列表能看到密钥的绑定设备', async () => {
   assert.ok(item, '列表里必须有刚生成的密钥');
   assert.equal(item.device, 'dev-a');
   assert.equal(item.banned, false);
+});
+
+test('列表接口按 limit / cursor 分页', async () => {
+  const env = makeEnv();
+  await newKey(env, 3);
+  const headers = { authorization: 'Bearer test-admin' };
+
+  const first = await json(await call(env, '/admin/api/keys?limit=2', { headers }));
+  assert.equal(first.body.ok, true);
+  assert.equal(first.body.items.length, 2);
+  assert.equal(first.body.complete, false);
+  assert.ok(first.body.cursor, '未取完时必须给出游标');
+
+  const second = await json(
+    await call(env, `/admin/api/keys?limit=2&cursor=${encodeURIComponent(first.body.cursor)}`, { headers }),
+  );
+  assert.equal(second.body.items.length, 1);
+  assert.equal(second.body.complete, true);
+  assert.equal(second.body.cursor, '');
+});
+
+test('单次生成数量最多 20 个', async () => {
+  const env = makeEnv();
+  const keys = await newKey(env, 999);
+  assert.equal(keys.length, 20);
+});
+
+test('管理接口不返回 CORS 头，公开接口保留', async () => {
+  const env = makeEnv();
+  const admin = await call(env, '/admin/api/keys', { headers: { authorization: 'Bearer test-admin' } });
+  assert.equal(admin.headers.get('access-control-allow-origin'), null);
+  const health = await call(env, '/api/health');
+  assert.equal(health.headers.get('access-control-allow-origin'), '*');
+});
+
+test('管理页带安全响应头', async () => {
+  const env = makeEnv();
+  const res = await call(env, '/admin');
+  const csp = res.headers.get('content-security-policy') || '';
+  assert.match(csp, /default-src 'none'/);
+  assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(res.headers.get('cache-control'), 'no-store');
+});
+
+test('管理操作会写入审计日志', async () => {
+  const env = makeEnv();
+  const headers = { authorization: 'Bearer test-admin' };
+  const [key] = await newKey(env, 2);
+  await call(env, '/admin/api/revoke', { method: 'POST', headers, body: { key, banned: true } });
+
+  const { body } = await json(await call(env, '/admin/api/logs', { headers }));
+  assert.equal(body.ok, true);
+  assert.equal(body.items[0].action, 'revoke');
+  assert.equal(body.items[0].key, key);
+  assert.equal(body.items[1].action, 'create');
+  assert.equal(body.items[1].count, 2);
+});
+
+test('管理口令连续失败会被限流', async () => {
+  const env = makeEnv();
+  const ip = '203.0.113.77';
+  const bad = { authorization: 'Bearer wrong', 'cf-connecting-ip': ip };
+  let last;
+  for (let i = 0; i < 8; i++) {
+    last = await json(await call(env, '/admin/api/keys', { headers: bad }));
+    assert.equal(last.status, 401);
+  }
+  const blocked = await json(await call(env, '/admin/api/keys', { headers: bad }));
+  assert.equal(blocked.status, 429);
+  assert.equal(blocked.body.code, 'too_many_attempts');
+});
+
+test('激活时上报的设备信息会按白名单落库', async () => {
+  const env = makeEnv();
+  const [key] = await newKey(env);
+  await call(env, '/api/activate', {
+    method: 'POST',
+    body: {
+      key,
+      device: 'dev-a',
+      info: {
+        manufacturer: 'Xiaomi',
+        brand: 'Redmi',
+        model: '23127PN0CC',
+        android: '15',
+        sdk: 35,
+        app: '1.0.7',
+        evil: 'x',
+      },
+    },
+  });
+
+  const { body } = await json(
+    await call(env, '/admin/api/keys', { headers: { authorization: 'Bearer test-admin' } }),
+  );
+  const item = body.items.find((it) => it.key === key);
+  assert.equal(item.info.brand, 'Redmi');
+  assert.equal(item.info.model, '23127PN0CC');
+  assert.equal(item.info.sdk, '35');
+  assert.equal(item.info.evil, undefined, '白名单之外的字段不能落库');
+});
+
+test('旧客户端先绑定，新版校验可补全设备信息', async () => {
+  const env = makeEnv();
+  const [key] = await newKey(env);
+  const act = await (
+    await call(env, '/api/activate', { method: 'POST', body: { key, device: 'dev-a' } })
+  ).json();
+  assert.equal(act.ok, true);
+
+  await call(env, '/api/verify', {
+    method: 'POST',
+    body: { key, device: 'dev-a', token: act.token, info: { brand: 'Redmi', model: '23127PN0CC' } },
+  });
+
+  const { body } = await json(
+    await call(env, '/admin/api/keys', { headers: { authorization: 'Bearer test-admin' } }),
+  );
+  assert.equal(body.items.find((it) => it.key === key).info.model, '23127PN0CC');
+});
+
+test('设备信息格式不对不影响激活', async () => {
+  const env = makeEnv();
+  const [key] = await newKey(env);
+  const { body } = await json(
+    await call(env, '/api/activate', {
+      method: 'POST',
+      body: { key, device: 'dev-a', info: { model: { nested: true }, brand: 123 } },
+    }),
+  );
+  assert.equal(body.ok, true);
+  assert.equal(body.code, undefined);
+});
+
+test('备注可以修改并写入审计日志', async () => {
+  const env = makeEnv();
+  const headers = { authorization: 'Bearer test-admin' };
+  const [key] = await newKey(env);
+
+  const { body } = await json(
+    await call(env, '/admin/api/note', { method: 'POST', headers, body: { key, note: '  售后跟进  ' } }),
+  );
+  assert.equal(body.ok, true);
+  assert.equal(body.note, '售后跟进');
+
+  const list = await json(await call(env, '/admin/api/keys', { headers }));
+  assert.equal(list.body.items.find((it) => it.key === key).note, '售后跟进');
+
+  const logs = await json(await call(env, '/admin/api/logs', { headers }));
+  assert.equal(logs.body.items[0].action, 'note');
+  assert.equal(logs.body.items[0].key, key);
 });
 
 test('未知路径返回 404', async () => {

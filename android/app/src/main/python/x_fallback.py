@@ -175,6 +175,10 @@ def _extract(data: dict) -> dict:
             # 拿到的就是最高画质直链，播放和下载共用同一个地址
             "download_url": media[0]["url"],
             "content_type": "video",
+            # 分辨率随视频一起带回去：界面用它显示具体画质（如 1920×1080）。
+            # FxTwitter 大多会给 width/height，缺的时候 _wh_from_url 已经补过。
+            "width": media[0]["width"],
+            "height": media[0]["height"],
         }
 
     # 其余情况（纯图片 / 图集 / 多视频 / 图文混排）统一按「媒体列表」处理

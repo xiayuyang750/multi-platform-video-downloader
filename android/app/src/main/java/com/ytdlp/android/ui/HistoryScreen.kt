@@ -192,7 +192,7 @@ fun HistoryScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                                 }
                             }
                         },
-                        onCopy = { vm.copyText(video.sourceUrl) },
+                        onCopyText = { vm.copyText(it) },
                         onReanalyze = { vm.reanalyze(video) },
                         onDownload = { vm.startDownload(video) },
                         onDownloadPage = { index -> vm.startDownload(video, index) },
@@ -271,7 +271,8 @@ private fun HistoryItem(
     video: Video,
     expanded: Boolean,
     onToggle: () -> Unit,
-    onCopy: () -> Unit,
+    /** 复制的都是文本：折叠行是作品链接，展开态是作者 / 账号 ID / 原始链接。 */
+    onCopyText: (String) -> Unit,
     onReanalyze: () -> Unit,
     onDownload: () -> Unit,
     onDownloadPage: (Int) -> Unit,
@@ -298,7 +299,7 @@ private fun HistoryItem(
             trailing = {
                 // 折叠态就给出操作，与 Windows 端一致。
                 // 播放和下载不收在这一排：手机屏窄，五个图标挨一起容易误触。
-                MiniAction(Icons.Default.ContentCopy, "复制链接", onCopy)
+                MiniAction(Icons.Default.ContentCopy, "复制链接") { onCopyText(video.sourceUrl) }
                 MiniAction(Icons.Default.Refresh, "重新解析", onReanalyze)
                 MiniAction(Icons.Default.Delete, "删除这条记录", onDelete)
             },
@@ -323,12 +324,19 @@ private fun HistoryItem(
                 //
                 // 解析时间也不在这里重复：它就写在标题下方那一行，展开后依然在。
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    DetailLine("作者", video.uploader)
-                    DetailLine("账号 ID", video.uploaderId)
+                    // 作者 / 账号 ID / 原始链接这三行都带复制按钮：它们正是用户最常想
+                    // 单独拿出去的东西（发给别人、去对应平台搜、核对当初贴的链接）。
+                    // 值是空的（比如公众号没有账号 ID）时 DetailLine 整行不渲染，
+                    // 按钮自然也不会出现。
+                    DetailLine("作者", video.uploader, onCopy = { onCopyText(video.uploader) })
+                    DetailLine("账号 ID", video.uploaderId, onCopy = { onCopyText(video.uploaderId) })
                     DetailLine("时长", formatDuration(video.duration))
                     // 原始解析链接：之前界面上完全没有，用户想核对「当初贴的是哪个链接」
                     // 时无从下手。链接实测能铺到 14 行，所以默认折成 2 行、点击展开。
-                    DetailLine("原始链接", video.sourceUrl, collapsible = true)
+                    DetailLine(
+                        "原始链接", video.sourceUrl, collapsible = true,
+                        onCopy = { onCopyText(video.sourceUrl) },
+                    )
                     if (video.hasLocalFile) DetailLine("本地文件", "已下载")
                 }
 
@@ -482,9 +490,18 @@ private fun CompactRow(
  *
  *   箭头是必须的：一开始只靠文本末尾的「…」，实测确实没人意识到这里能点开 ——
  *   省略号只说明「被截断了」，不等于「可展开」。
+ *
+ * @param onCopy 非空时在值右侧显示一个复制小按钮。用 Box + Icon 而不是
+ *   IconButton：Material3 的 IconButton 会强制撑到 48dp 的触控高度，五行详情
+ *   每行都顶到 48dp 会把展开区撑得很松。
  */
 @Composable
-private fun DetailLine(label: String, value: String, collapsible: Boolean = false) {
+private fun DetailLine(
+    label: String,
+    value: String,
+    collapsible: Boolean = false,
+    onCopy: (() -> Unit)? = null,
+) {
     if (value.isBlank()) return
     // 用 value 做 key：换一条记录展开时，折叠状态要跟着重置
     var expanded by rememberSaveable(value) { mutableStateOf(false) }
@@ -510,6 +527,21 @@ private fun DetailLine(label: String, value: String, collapsible: Boolean = fals
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
+        if (onCopy != null) {
+            Box(
+                Modifier
+                    .size(24.dp)
+                    .clickable(onClick = onCopy),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Default.ContentCopy,
+                    contentDescription = "复制$label",
+                    tint = tone.textMuted,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+        }
         if (collapsible) {
             Icon(
                 if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,

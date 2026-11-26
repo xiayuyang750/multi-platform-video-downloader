@@ -24,7 +24,10 @@ object LicenseApi {
     private const val TIMEOUT_MS = 12_000
 
     fun activate(rawKey: String, device: String): Activated {
-        val body = JSONObject().put("key", rawKey).put("device", device)
+        val body = JSONObject()
+            .put("key", rawKey)
+            .put("device", device)
+            .put("info", deviceInfo())
         val json = post("/api/activate", body)
         if (!json.optBoolean("ok")) {
             throw LicenseException(json.optString("message", "激活失败"), fatal = true)
@@ -46,6 +49,7 @@ object LicenseApi {
             .put("key", key)
             .put("device", device)
             .put("token", token)
+            .put("info", deviceInfo())
         val json = post("/api/verify", body)
         if (!json.optBoolean("ok")) {
             val code = json.optString("code")
@@ -57,6 +61,21 @@ object LicenseApi {
             token = json.optString("token").ifBlank { token },
             exp = json.optLong("exp", 0L),
         )
+    }
+
+    /**
+     * 可读设备信息，只用于后台展示。
+     *
+     * 任何一步失败都不能影响激活 / 校验本身，所以整体包在 runCatching 里；
+     * 拿不到就传空对象，服务端会当作「未上报」处理。
+     */
+    private fun deviceInfo(): JSONObject {
+        val info = JSONObject()
+        runCatching {
+            DeviceId.info().forEach { (k, v) -> info.put(k, v) }
+            info.put("app", BuildConfig.VERSION_NAME)
+        }
+        return info
     }
 
     private fun post(path: String, body: JSONObject): JSONObject {

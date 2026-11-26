@@ -496,6 +496,10 @@ body {
 .icon-btn.is-danger:hover { background: var(--danger-soft); color: var(--danger); }
 .icon-btn > svg { display: block; }
 
+/* 详情行尾的复制小按钮：比折叠行的操作图标再小一圈，不抬高行高 */
+.detail-copy { width: 22px; height: 22px; flex: 0 0 auto; }
+.detail-copy.is-copied { background: var(--accent-soft); color: var(--accent); }
+
 /* 展开态：向下扩出播放预览区 */
 .history-detail {
   padding: 0 16px 16px;

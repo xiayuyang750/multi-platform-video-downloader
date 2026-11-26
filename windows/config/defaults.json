@@ -5,7 +5,7 @@
 
   "download": {
     "output_dir": "D:\\Download",
-    "filename_template": "%(title)s [%(id)s].%(ext)s",
+    "filename_template": "%(title).120B - %(uploader,channel,creator|未知作者)s.%(ext)s",
     "quality": "best",
     "single_video_no_playlist": true
   },

@@ -41,10 +41,11 @@ android {
         applicationId = "com.ytdlp.android"
         minSdk = 26
         targetSdk = 36
-        // 1.0.7：快手平台、全平台正文提取、抖音多渠道路由与失败快判（v1.0.7 进展快照），
-        // 以及新增「实况」页（手动选图 + 视频合成实况图）与 vivo 实况双写兼容。
-        versionCode = 7
-        versionName = "1.0.7"
+        // 1.0.8：文件名规则修复、历史记录复制、公众号图文实况图、X/小红书真实画质；
+        //        内置引擎 yt-dlp 升级到 2026.11.23 并锁定版本；
+        //        release 开启 R8 + 资源裁剪（APK 41.2MB -> 27.8MB）
+        versionCode = 8
+        versionName = "1.0.8"
 
         // 授权服务地址，见文件上方 licenseBaseUrl 的说明
         buildConfigField("String", "LICENSE_BASE_URL", "\"$licenseBaseUrl\"")
@@ -70,7 +71,12 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             // 拿到签名配置才挂上去，否则 release 构建会因为缺 keystore 直接失败
             if (keystoreProps.isNotEmpty()) {
                 signingConfig = signingConfigs.getByName("release")
@@ -122,7 +128,11 @@ chaquopy {
         buildPython("D:/Dev-env/Python312/python.exe")
 
         pip {
-            install("yt-dlp")
+            // 必须锁版本：不锁时 Chaquopy 每次「清缓存重新构建」都会去 PyPI 取
+            // **当时最新的** yt-dlp —— 代码没改，打出来的 APK 里引擎版本却变了，
+            // 而且会和 Windows 端 bin/yt-dlp.exe 的版本对不上。
+            // 当前两端统一为 2026.11.23（2026-11-23 稳定版）。
+            install("yt-dlp==2026.11.23")
         }
     }
 }

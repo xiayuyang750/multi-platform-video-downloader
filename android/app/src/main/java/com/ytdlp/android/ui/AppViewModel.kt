@@ -202,8 +202,8 @@ data class LiveUi(
     val imageRev: Int = 0,
     val videoRev: Int = 0,
     /**
-     * 输出文件名前缀，用户可改。留空时用「原图名_实况」——
-     * 比纯时间戳可读：用户导出后一眼知道它来自哪张图。
+     * 输出文件名前缀，用户可改。留空时用「原图名_实况」，素材名拿不到可读内容
+     * （相册只给编号）时用「实况」—— 比一串数字可读，用户导出后一眼知道来历。
      */
     val namePrefix: String = "",
     /**
@@ -1090,7 +1090,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _live.value = _live.value.copy(singleFile = enabled, error = "")
     }
 
-    /** 改输出文件名前缀。空串表示回到默认（原图名_实况）。 */
+    /** 改输出文件名前缀。空串表示回到默认（素材名_实况 / 拿不到素材名时用「实况」）。 */
     fun setLiveNamePrefix(text: String) {
         // 文件名里不能出现路径分隔符，顺手挡掉；长度也要收一收，
         // 否则加上时间戳后会超过部分文件系统的单段上限
@@ -1240,8 +1240,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     // 不能用磁盘上的 name —— 缓存副本按槽位固定命名（video.mp4 / cover.jpg），
                     // 生成出来就全叫「video_实况_…」「cover_实况_…」，用户看不出是哪条素材。
                     val base = s.namePrefix.trim().ifBlank {
+                        // 素材名拿不到可读内容（相册只给编号）时退回「实况」
                         val src = if (s.imagePath.isNotBlank()) s.imageLabel else s.videoLabel
-                        src.substringBeforeLast('.', src) + "_实况"
+                        LivePhotoSynth.defaultOutputBase(src)
                     }
                     val stem = "${base}_$stamp"
                     if (s.singleFile) {
